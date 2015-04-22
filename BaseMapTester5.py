@@ -342,7 +342,7 @@ class BaseMapTester(threading.Thread):
         self.outq.task_done()
     
     def testBaseMap(self,ref):
-        dlist = ((ref,self.zmin,DT.now(),(0,0,0,0,0)),)
+        dlist = ((ref,self.zmin,DT.now(),(0,0,0,0,0,0)),)
         tlist = {}
         xyz = (self.xinit,self.yinit,self.zmin)
         mr = MapRange(ref,self.tcol,self.tset)
@@ -352,6 +352,7 @@ class BaseMapTester(threading.Thread):
             tlist[zlev] = mr.getAllTiles(nbrs)
     
             landkeys = [zk for zk in tlist[zlev] if tlist[zlev][zk]['mn'] > LAND_THRESHOLD and tlist[zlev][zk]['ex']]
+            fail429 = len([zk for zk in tlist[zlev] if tlist[zlev][zk]['er']==429])
             fail500 = len([zk for zk in tlist[zlev] if tlist[zlev][zk]['er']==500])
             fail503 = len([zk for zk in tlist[zlev] if tlist[zlev][zk]['er']==503])
             failXXX = len([zk for zk in tlist[zlev] if tlist[zlev][zk]['er'] and tlist[zlev][zk]['er']<>500 and tlist[zlev][zk]['er']<>503])
@@ -377,7 +378,7 @@ class BaseMapTester(threading.Thread):
                 return dlist
                 #self.close()
 
-            dlist += ((ref,zlev+1,DT.now(),(fail500,fail503,failXXX,zero,len(landkeys))),)
+            dlist += ((ref,zlev+1,DT.now(),(fail429,fail500,fail503,failXXX,zero,len(landkeys))),)
         bmtlog.info('{}# Test Complete - at Z={}'.format(ref,zlev))
         return dlist
     
@@ -562,7 +563,8 @@ class BaseMapResult(object):
     #fail,zero,land
     
     def plotTileCounts(self):
-        defns = (('tilefail500','Tile Failure Count HTTP500'),
+        defns = (('tilefail429','Tile Failure Count HTTP429'),
+                 ('tilefail500','Tile Failure Count HTTP500'),
                  ('tilefail503','Tile Failure Count HTTP503'),
                  ('tilefail5XX','Tile Failure Count HTTP5XX'),
                  ('tileblank','Tile Blank Count'),
@@ -787,7 +789,7 @@ class TileFetcher(threading.Thread):
                     bmtlog.error('{}.{}# {} - {}'.format(self.ref,self.cref,he,url))
                     break
             except Exception as ue:
-                print 'Unknown Error retrieving url {}\n{}'.format(url,ue)
+                print 'Unknown Error retrieving url {}\n{}\n'.format(url,ue)
                 if retry<MAX_RETRY:
                     print '{}.{}# Retrying {} - {}'.format(self.ref,self.cref,retry,(x,y,z))
                     err = 0
