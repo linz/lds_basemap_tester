@@ -32,7 +32,8 @@ python BaseMapTester_old.py -u <simulated_users> [-w <width> -h <height>] [-r <r
     -v (--version) Display version information
     -i (--info) Display this message"
 
-NB.1 API Keys (when enabled) should be saved in a file called ".key" in the same directory where this program is run
+NB.1 API Keys (when enabled) should be saved in a file called ".key" in the same directory where this program is run.
+this file should use the format key=ABCDEFGHIJKLIMNOPQRSTUVWXYZ12345678
 '''
 
 from urllib2 import HTTPError, base64, ProxyHandler
@@ -137,7 +138,7 @@ UU = {'imagery'  :{'url':STU,
                    'ii':((5,19,31,19),)},
       'parcel'  :{'url':LY1,
                   'tms':'',
-                  'sl':{'Parcel_81':(1571,81),'Parcel_82':(1571,82)},
+                  'sl':{'Parcel_81':(1571,81),'Parcel_82':(1571,82),'Parcel':(1571,),},
                   'ii':((0,20,0,0),)}
       }
 
@@ -265,7 +266,8 @@ class TestRunner(object):
         UUs = {u:v for u,v in UU.items() if tc in v['url']}#sets or layers
         x = [(u,v['sl']) for u,v in UUs.items() if int(ts) in [w[0] for w in v['sl'].values()]]
         #x = [(u,v) for u,v in x0 if int(ts) in [w[0] for w in v.values()]]
-        y = [i for i,j in x[0][1].items() if int(ts) in j]
+        #sort the tset results so the shortest result gets picked first, conventionally the one without style
+        y = sorted([i for i,j in x[0][1].items() if int(ts) in j])
         return x[0][0],y[0]#x[1][0].y[0]
     
     @classmethod
@@ -669,7 +671,7 @@ class MapRange(object):
         self.URL = UU[tcol]['url']
         self.TMS = UU[tcol]['tms']
         self.SORL = UU[tcol]['sl'][tset][0]
-        self.STYLE = ',style={}'.format(UU[tcol]['sl'][tset][1]) if UU[tcol]['sl'][tset]>1 else ''
+        self.STYLE = ',style={}'.format(UU[tcol]['sl'][tset][1]) if len(UU[tcol]['sl'][tset])>1 else ''
         #self.zlev = {i:{} for i in range(ZMIN,ZMAX)}
 
         
