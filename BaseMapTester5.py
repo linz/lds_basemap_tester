@@ -66,10 +66,11 @@ class UnknownLandTypeRequest(Exception): pass
 class UnknownConfigLayerRequest(Exception): pass
 
 VER = 1.0
-MAX_RETRY = 3
+MAX_RETRY = 10
 ZMAX = 20
 ZMIN = 0
 USERS = 16
+#LAND_THRESHOLD = 0.0005
 LAND_THRESHOLD = 0.0005#0.0001 identifies ocean as parcel 0.001 cant find imagery in wlg_u/6 
 WIDTH = 7
 HEIGHT = 5
@@ -77,11 +78,15 @@ WHstr = str(WIDTH)+'x'+str(HEIGHT)
 KEY = ''
 B64A = ''
 PARA = True
+NON_PC_LYR = 0
 
 LOGFILE = 'basemaptst.log'
 DEF_TILE_COLLECTION = 'RAND'#'basemap'
 DEF_TILE_SET = 'RAND'#'colour'
 
+#Default starting zoomlevel and start tiles
+Z0I = ((0,20,0,0),)
+Z3I = ((3,20,7,5),(3,20,7,4))
 
 #in LY2 replace {id} with {id},{style} if we figure out what style means
 STU = 'http://tiles-{cdn}.data-cdn.linz.govt.nz/services;key={k}/tiles/v4/set={id}{style}/{TileMatrixSet}/{TileMatrix}/{TileCol}/{TileRow}.png'
@@ -95,11 +100,11 @@ GCU = 'https://data.linz.govt.nz/services;key={k}/wmts/1.0.0/set/{set}/WMTSCapab
 UU = {'imagery'  :{'url':STU,
                   'tms':'EPSG:3857',
                   'sl':{'National':(2,),},
-                  'ii':((3,20,7,5),(3,20,7,4))},
+                  'ii':Z3I},
       'basemap'  :{'url':STU,
                   'tms':'EPSG:3857',
                   'sl':{'Colour':(37,73),'Greyscale':(36,72)},
-                  'ii':((0,20,0,0),)},
+                  'ii':Z0I},
       'rural_nth':{'url':LY1,
                   'tms':'',
                   'sl':{'Northland_R':(1918,),},
@@ -139,7 +144,19 @@ UU = {'imagery'  :{'url':STU,
       'parcel'  :{'url':LY1,
                   'tms':'',
                   'sl':{'Parcel_81':(1571,81),'Parcel_82':(1571,82),'Parcel':(1571,),},
-                  'ii':((0,20,0,0),)}
+                  'ii':Z0I},      
+      'pset'    :{'url':STU,
+                  'tms':'',
+                  'sl':{'wireframe':(69,),},
+                  'ii':Z3I},
+      'topo'    :{'url':LY1,
+                  'tms':'',
+                  'sl':{'t50':(767,),'t250':(798,)},
+                  'ii':Z0I},
+      'default' :{'url':LY1,
+                  'tms':'',
+                  'sl':{'layer':(0,),'set':(0,),},
+                  'ii':Z0I},
       }
 
 
@@ -165,8 +182,10 @@ class TestRunner(object):
         bmtlog.info('Config parameters {}/{}'.format(tc,ts))
         
         if ts=='ALL' or tc=='ALL':
+            #all configured layers
             rcs = TestRunner.getEveryTileSet() 
         elif ts=='RAND' or tc=='RAND':
+            #randomly from all configured layers
             rcs = TestRunner.getRandomTileSet()
         else:
             rcs = TestRunner.parseUserArgsList(tc,ts)
@@ -180,7 +199,7 @@ class TestRunner(object):
             ioq['in'].put(ref)
             bmt = BaseMapTester(ioq['in'],ioq['out'])
                 
-            print 'TCTS',ref,rtc,rts
+            print 'TCTS',ref,rtc,rts, NON_PC_LYR if NON_PC_LYR else '' 
             zinit = random.choice(UU[rtc]['ii']) if len(UU[rtc]['ii'])>1 else UU[rtc]['ii'][0]
             bmt.setup(rtc,rts,*zinit)
             bmt.setDaemon(True)
@@ -197,7 +216,7 @@ class TestRunner(object):
         
         bmr = BaseMapResult(tstamp)
         bmp = BaseMapPickle(tstamp)
-        bmp.setconf({'height':HEIGHT,'width':WIDTH})
+        bmp.setconf({'height':HEIGHT,'width':WIDTH,'npcl':NON_PC_LYR})
         while not ioq['out'].empty():
             qe = ioq['out'].get()
             bmp.append(qe)
@@ -209,11 +228,13 @@ class TestRunner(object):
     def loadTestResults(self,ref): 
         bmp = BaseMapPickle(ref)
         data = bmp.load()
-        h,w = bmp.getconf()
+        h,w,l = bmp.getconf()
         global HEIGHT
         HEIGHT = h
         global WIDTH
         WIDTH = w
+        global NON_PC_LYR
+        NON_PC_LYR = l
         bmr = BaseMapResult(ref,data)
         bmr.show()
         
@@ -267,7 +288,13 @@ class TestRunner(object):
         x = [(u,v['sl']) for u,v in UUs.items() if int(ts) in [w[0] for w in v['sl'].values()]]
         #x = [(u,v) for u,v in x0 if int(ts) in [w[0] for w in v.values()]]
         #sort the tset results so the shortest result gets picked first, conventionally the one without style
-        y = sorted([i for i,j in x[0][1].items() if int(ts) in j])
+        if x:
+            y = sorted([i for i,j in x[0][1].items() if int(ts) in j])
+        else:
+            #if there is no x the layer/set wasnt found so return defaults
+            global NON_PC_LYR
+            NON_PC_LYR = ts
+            return 'default', 'layer'
         return x[0][0],y[0]#x[1][0].y[0]
     
     @classmethod
@@ -297,7 +324,7 @@ class BaseMapPickle(object):
             self.data[k] = conf[k]
         
     def getconf(self):
-        return self.data['height'],self.data['width']
+        return self.data['height'],self.data['width'],self.data['npcl']
         
     def dump(self):
         pdir = '{}{}'.format(fpath,self.ref)
@@ -370,8 +397,8 @@ class BaseMapTester(threading.Thread):
                 xyz = mr.translate(*xyz)
             elif retry<MAX_RETRY:
                 retry += 1
-                print '{}# z={} c={},t={} - Shift {}'.format(ref,zlev,xyz,len(landkeys),retry)
-                bmtlog.debug('{}# z={} c={},t={} - Shift {}'.format(ref,zlev,xyz,len(landkeys),retry))
+                print '{}# z={} c={},t={} - Shift and Retry {}'.format(ref,zlev,xyz,len(landkeys),retry)
+                bmtlog.debug('{}# z={} c={},t={} - Shift and Retry {}'.format(ref,zlev,xyz,len(landkeys),retry))
                 xyz = mr.shift(*xyz)
             else: 
                 print '{}# z={} c={} t=0 - No Land Tiles'.format(ref,zlev,xyz)
@@ -421,20 +448,25 @@ class BaseMapResult(object):
         self.plotTileCounts()
         self.plot2DHistZoomTime()
         
+    def _legend(self,j,seq,t=None):
+        extra = '-'+NON_PC_LYR if NON_PC_LYR else ''
+        if t: return 't{}-{}{}'.format(t[seq][0],seq,extra)
+        return 'u{}-{}-{}{}'.format(j,seq[0],seq[1],extra)
+    
     def plotRawUserTimeLine(self):
         fn = '{}{}/rawtime_{}.png'.format(fpath,self.ref,self.ref)
         b = {}
-        t = ()
+        lgd = ()
         zero = DT(2000,1,1)
         for j,sequence in enumerate(self.res):
             minseq = min(sequence[2])
-            t += ('{}-{}-{}'.format(j,sequence[0],sequence[1]),)
+            lgd += (self._legend(j,sequence),)
             X = [i[1] for i in sequence[2]]
             #Y = [MDT.date2num(zero+(v[2]-minseq[2])) for v in sequence[2]]
             Y = [zero+(v[2]-minseq[2]) for v in sequence[2]]
             #xy = [(x,y) for x,y in zip(X,Y)]
             b[i] = PP.plot(self.offsetX(X),Y)#,color=self.colours[i])
-        PP.legend(([b[bi][0] for bi in b]),t,loc=2)
+        PP.legend(([b[bi][0] for bi in b]),lgd,loc=2)
         PP.title('Raw Zoom Timing / Res({}), User({}{})'.format(WHstr,USERS,'p' if PARA else 's'))
         PP.xlabel('zoom level')
         PP.ylabel('time (h:m:s)')
@@ -448,7 +480,7 @@ class BaseMapResult(object):
         prev = [(x,y) for x,y in zip(range(self.reslen),self.reslen*[0,])][1:]
         for j,sequence in enumerate(self.res):
             #title
-            lgd += ('{}-{}-{}'.format(j,sequence[0],sequence[1]),)
+            lgd += (self._legend(j,sequence),)
             #extract and diff y values
             p1 = [v[2] for v in sequence[2]]
             p2 = p1[1:]
@@ -491,7 +523,8 @@ class BaseMapResult(object):
                 t[k] = (1,xy)
 
         for j,seq2 in enumerate(t):
-            lgd += ('{}/{}'.format(seq2,t[seq2][0]),)
+            #lgd += ('{}/{}'.format(seq2,t[seq2][0]),)
+            lgd += (self._legend(j,seq2,t),)
             shift = 1.0/len(t)
             #calculate bar width and average Y values/clients
             X2 = [i[0]+(j*shift) for i in t[seq2][1]]
@@ -533,7 +566,8 @@ class BaseMapResult(object):
                 t[kk][1][n] = (col[0],self.median(col[1]))
             
         for j,seq2 in enumerate(t):
-            lgd += ('{}/{}'.format(seq2,t[seq2][0]),)
+            #lgd += ('{}/{}'.format(seq2,t[seq2][0]),)
+            lgd += (self._legend(j,seq2,t),)
             shift = 1.0/len(t)
             #calculate bar width and average Y values/clients
             X2 = [i[0]+(j*shift) for i in t[seq2][1]]
@@ -582,7 +616,8 @@ class BaseMapResult(object):
         prev = [(x,y) for x,y in zip(range(self.reslen),self.reslen*[0,])][1:]
         for j,sequence in enumerate(self.res):
             #legend
-            lgd += ('{}-{}-{}'.format(j,sequence[0],sequence[1]),)
+            #lgd += ('{}-{}-{}'.format(j,sequence[0],sequence[1]),)
+            lgd += (self._legend(j,sequence),)
             #extract, calc and pair coordinates
             X = [i[1] for i in sequence[2]]
             Y = [v[3][pnum] for v in sequence[2]]#500 errors
@@ -663,14 +698,15 @@ class BaseMapResult(object):
 
 class MapRange(object):
     
-    def __init__(self,ref,tcol='basemap',tset='colour'):
+    def __init__(self,ref,tcol='default',tset='layer'):
         self.setTileCollection(tcol)
         self.setTileSet(tset)
         
+        id = UU[tcol]['sl'][tset][0]
         self.ref = ref
         self.URL = UU[tcol]['url']
         self.TMS = UU[tcol]['tms']
-        self.SORL = UU[tcol]['sl'][tset][0]
+        self.SORL = UU[tcol]['sl'][tset][0] if UU[tcol]['sl'][tset][0] else NON_PC_LYR
         self.STYLE = ',style={}'.format(UU[tcol]['sl'][tset][1]) if len(UU[tcol]['sl'][tset])>1 else ''
         #self.zlev = {i:{} for i in range(ZMIN,ZMAX)}
 
@@ -700,7 +736,7 @@ class MapRange(object):
     @classmethod            
     def shift(self,x,y,z):
         '''Blindly(!) select a neighbouring tile if the zoomed centre tile doesnt return any valid land tiles'''
-        return (x+random.randint(-1,1),y+random.randint(-1,1),z)
+        return (abs(x+random.randint(-1,1)),abs(y+random.randint(-1,1)),z)
     
     
     @classmethod
