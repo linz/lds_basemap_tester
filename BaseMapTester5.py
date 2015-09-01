@@ -57,9 +57,7 @@ import numpy as NP
 
 #from mpl_toolkits.basemap import Basemap
 import matplotlib.pyplot as PP
-import matplotlib.dates as MDT
 import matplotlib as mpl
-from radialnet.core import ArgvHandle
 
 class ImpossibleZoomLevelCoordinate(Exception): pass
 class UnknownLandTypeRequest(Exception): pass
@@ -70,7 +68,6 @@ MAX_RETRY = 10
 ZMAX = 20
 ZMIN = 0
 USERS = 16
-#LAND_THRESHOLD = 0.0005
 LAND_THRESHOLD = 0.0005#0.0001 identifies ocean as parcel 0.001 cant find imagery in wlg_u/6 
 WIDTH = 7
 HEIGHT = 5
@@ -78,9 +75,10 @@ WHstr = str(WIDTH)+'x'+str(HEIGHT)
 KEY = ''
 B64A = ''
 PARA = True
+SHOW = True
 NON_PC_LYR = 0
 
-LOGFILE = 'basemaptst.log'
+LOGFILE = 'BMT'
 DEF_TILE_COLLECTION = 'RAND'#'basemap'
 DEF_TILE_SET = 'RAND'#'colour'
 
@@ -164,8 +162,8 @@ UU = {'imagery'  :{'url':STU,
 akf = '.key'
 sty = 'auto'
 
-fpath = ''
-tstamp = '{0:%y%m%d_%H%M%S}'.format(DT.now())
+FPATH = ''
+TSTAMP = '{0:%y%m%d_%H%M%S}'.format(DT.now())
 bmtlog = None#logging.getLogger(None)
 
 #-------------------------------------------------------------------------------------------
@@ -214,8 +212,8 @@ class TestRunner(object):
         
         print 'All queues joined'
         
-        bmr = BaseMapResult(tstamp)
-        bmp = BaseMapPickle(tstamp)
+        bmr = BaseMapResult(TSTAMP)
+        bmp = BaseMapPickle(TSTAMP)
         bmp.setconf({'height':HEIGHT,'width':WIDTH,'npcl':NON_PC_LYR})
         while not ioq['out'].empty():
             qe = ioq['out'].get()
@@ -327,12 +325,12 @@ class BaseMapPickle(object):
         return self.data['height'],self.data['width'],self.data['npcl']
         
     def dump(self):
-        pdir = '{}{}'.format(fpath,self.ref)
+        pdir = '{}{}'.format(FPATH,self.ref)
         if not os.path.exists(pdir): os.mkdir(pdir)
         pickle.dump(self.data,open('{}/{}.p'.format(pdir,self.ref),'wb'))
         
     def load(self):
-        self.data = pickle.load(open('{}{}/{}.p'.format(fpath,self.ref,self.ref),'rb'))
+        self.data = pickle.load(open('{}{}/{}.p'.format(FPATH,self.ref,self.ref),'rb'))
         return self.data['data']
         
 class BaseMapTester(threading.Thread):
@@ -376,9 +374,11 @@ class BaseMapTester(threading.Thread):
         xyz = (self.xinit,self.yinit,self.zmin)
         mr = MapRange(ref,self.tcol,self.tset)
         retry = 0
-        for zlev in range(self.zmin,self.zmax):
+        zlev = self.zmin
+        while zlev<self.zmax:
             nbrs = mr.getNeighbours(*xyz,width=WIDTH,height=HEIGHT)#get WxH tileset coords
             tlist[zlev] = mr.getAllTiles(nbrs)
+            if SHOW: BaseMapResult._showTileArray(tlist[zlev])
     
             landkeys = [zk for zk in tlist[zlev] if tlist[zlev][zk]['mn'] > LAND_THRESHOLD and tlist[zlev][zk]['ex']]
             fail429 = len([zk for zk in tlist[zlev] if tlist[zlev][zk]['er']==429])
@@ -400,12 +400,14 @@ class BaseMapTester(threading.Thread):
                 print '{}# z={} c={},t={} - Shift and Retry {}'.format(ref,zlev,xyz,len(landkeys),retry)
                 bmtlog.debug('{}# z={} c={},t={} - Shift and Retry {}'.format(ref,zlev,xyz,len(landkeys),retry))
                 xyz = mr.shift(*xyz)
+                zlev = xyz[2]
             else: 
                 print '{}# z={} c={} t=0 - No Land Tiles'.format(ref,zlev,xyz)
                 bmtlog.debug('{}# z={} c={} t=0 - Quit'.format(ref,zlev,xyz))
                 bmtlog.error('Test Aborted - at Z={}'.format(zlev))
                 return dlist
                 #self.close()
+            zlev += 1
 
             dlist += ((ref,zlev+1,DT.now(),(fail429,fail500,fail503,failXXX,zero,len(landkeys))),)
         bmtlog.info('{}# Test Complete - at Z={}'.format(ref,zlev))
@@ -454,7 +456,7 @@ class BaseMapResult(object):
         return 'u{}-{}-{}{}'.format(j,seq[0],seq[1],extra)
     
     def plotRawUserTimeLine(self):
-        fn = '{}{}/rawtime_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/rawtime_{}.png'.format(FPATH,self.ref,self.ref)
         b = {}
         lgd = ()
         zero = DT(2000,1,1)
@@ -471,10 +473,11 @@ class BaseMapResult(object):
         PP.xlabel('zoom level')
         PP.ylabel('time (h:m:s)')
         self._output(PP,fn)
+        self.fig.clear()
         
     def plotRawUserTimeDiff(self): 
         #TODO. shift diff values left to x=0
-        fn = '{}{}/rawdiff_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/rawdiff_{}.png'.format(FPATH,self.ref,self.ref)
         b = {}
         lgd = ()
         prev = [(x,y) for x,y in zip(range(self.reslen),self.reslen*[0,])][1:]
@@ -500,9 +503,10 @@ class BaseMapResult(object):
         PP.xlabel('zoom level')
         PP.ylabel('time (seconds)')
         self._output(PP,fn)
+        self.fig.clear()
         
     def plotRawUserTimeAverageDiff(self): 
-        fn = '{}{}/avgdiff_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/avgdiff_{}.png'.format(FPATH,self.ref,self.ref)
         b = {}
         t = dict()
         lgd = ()
@@ -537,9 +541,10 @@ class BaseMapResult(object):
         PP.xlabel('zoom level')
         PP.ylabel('time (seconds)')
         self._output(PP,fn)
+        self.fig.clear()
         
     def plotRawUserTimeMedianDiff(self): 
-        fn = '{}{}/meddiff_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/meddiff_{}.png'.format(FPATH,self.ref,self.ref)
         b = {}
         t = dict()
         lgd = ()
@@ -580,9 +585,10 @@ class BaseMapResult(object):
         PP.xlabel('zoom level')
         PP.ylabel('time (seconds)')
         self._output(PP,fn)
+        self.fig.clear()
         
     def plotTimeDeltaHist(self):
-        fn = '{}{}/dlthist_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/dlthist_{}.png'.format(FPATH,self.ref,self.ref)
         #lis = self.flatten(self.res)
         delta = [] 
         for sequence in self.res:
@@ -595,6 +601,7 @@ class BaseMapResult(object):
         PP.xlabel('seconds/layer')
         PP.ylabel('frequency')
         self._output(PP,fn)
+        self.fig.clear()
         
     #fail,zero,land
     
@@ -610,7 +617,7 @@ class BaseMapResult(object):
             self.plotCount(j,dd)
             
     def plotCount(self,pnum,deftxt):
-        fn = '{}{}/{}_{}.png'.format(fpath,self.ref,deftxt[0],self.ref)
+        fn = '{}{}/{}_{}.png'.format(FPATH,self.ref,deftxt[0],self.ref)
         b = {}
         lgd = ()
         prev = [(x,y) for x,y in zip(range(self.reslen),self.reslen*[0,])][1:]
@@ -634,10 +641,11 @@ class BaseMapResult(object):
         PP.ylabel('tile count')
         PP.xlim(0,max([mx for mx,my in prev]))
         self._output(PP,fn)   
+        self.fig.clear()
         
  
     def plot2DHistZoomTime(self):
-        fn = '{}{}/zthist_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/zthist_{}.png'.format(FPATH,self.ref,self.ref)
         delta = []
         zrnge = []
         for sequence in self.res:
@@ -662,6 +670,7 @@ class BaseMapResult(object):
         PP.ylabel('zoom level')
 
         self._output(PP,fn)
+        self.fig.clear()
         
     def stack(self,curr,prev):
         '''Add two datasets provided as pairs by matching x coords'''
@@ -687,10 +696,38 @@ class BaseMapResult(object):
         else:
             return (slst[index] + slst[index + 1])/2.0
         
-    def _output(self,pobj,fn=None):
+    @classmethod
+    def _output(cls,pobj,fn=None):
         pobj.savefig(fn, bbox_inches='tight') if fn else pobj.show()
-        self.fig.clear()
+
+    @classmethod        
+    def _showTileArray(cls,tilearray):
+        '''Static debugging method to show tile tracking progress'''
+        size = 64
+        z = tilearray.keys()[0][2]
+        screensize = min(size*pow(2,z),size*WIDTH),min(size*pow(2,z),size*HEIGHT)
+        screen = Image.new('RGB',screensize,'grey')
+        blank = Image.new('RGB',2*(size,),'white')
         
+        xx = sorted(set([a[0] for a in tilearray.keys()]))
+        yy = sorted(set([a[1] for a in tilearray.keys()]))
+        for x in xx:
+            #line = ''
+            for y in yy:
+                print tilearray[(x,y,z)]['url']
+                img = tilearray[(x,y,z)]['img']
+                img.thumbnail(2*(size,))
+                if tilearray[(x,y,z)]['mn']>LAND_THRESHOLD:
+                    screen.paste(img,(x*size,y*size))
+                else:
+                    screen.paste(blank,(x*size,y*size))
+                #if tilearray[(x,y,z)]['mn']>LAND_THRESHOLD:
+                #    line += '+'
+                #else: line += '-'
+            #print line
+        fn = '{}{}/{}.png'.format(FPATH,TSTAMP,'.'.join([i[0]+str(i[1]) for i in zip('XYZ',tilearray.keys()[0])]))
+        screen.save(fn)
+        #screen.show()
         
     #@classmethod
     #def flatten(cls,lis):
@@ -720,12 +757,13 @@ class MapRange(object):
         self.tcol = tcol
         
     def getBounds(self,t):
+        '''get values for selection half width/height around centre'''
         return (t-1)/2,t/2+1
     
     def getNeighbours(self,x, y, z, width, height):
         '''Returns coordinates of all valid neighbours within WxH'''
         w,h = self.getBounds(width),self.getBounds(height)
-        return [(a,b,z) for a in range(x-w[0],x+w[1]) for b in range(y-h[0],y+h[1]) if a>-1 and b>-1 and a<=pow(2,z) and b<=pow(2,z)]
+        return [(a,b,z) for a in range(x-w[0],x+w[1]) for b in range(y-h[0],y+h[1]) if a>-1 and b>-1 and a<pow(2,z) and b<pow(2,z)]
     
     @classmethod
     def translate(cls,x,y,z,newz=None):
@@ -839,10 +877,10 @@ class TileFetcher(threading.Thread):
                     bmtlog.error('{}.{}# {} - {}'.format(self.ref,self.cref,ue,url))
                     break
                 
-        return {(x,y,z):{'img':img,'mn':isx[0],'sd':isx[1],'ex':isx[2]<>[(15,15)],'er':err}}
+        return {(x,y,z):{'img':img,'mn':isx[0],'sd':isx[1],'ex':isx[2]<>[(15,15)],'er':err,'url':url}}
     
 #------------------------------------------------------------------------------------------
-def logger(lf,ll=logging.DEBUG,ff=2):
+def logger(lf,rlid=None,ll=logging.DEBUG,ff=2):
     formats = {1:'%(asctime)s - %(levelname)s - %(module)s %(lineno)d - %(message)s',
                2:'%(asctime)s - %(levelname)s - %(message)s',
                3:':: %(module)s %(lineno)d - %(message)s',
@@ -851,10 +889,10 @@ def logger(lf,ll=logging.DEBUG,ff=2):
     log = logging.getLogger(lf)
     log.setLevel(ll)
     
-    path = os.path.normpath(os.path.join(os.path.dirname(__file__),tstamp))
+    path = os.path.normpath(os.path.join(os.path.dirname(__file__),rlid if rlid else TSTAMP))
     if not os.path.exists(path):
         os.mkdir(path)
-    df = os.path.join(path,lf.lower())
+    df = os.path.join(path,'{}_{}.log'.format(lf.upper(),TSTAMP))
     
     fh = logging.FileHandler(df,'w')
     fh.setLevel(logging.DEBUG)
@@ -960,14 +998,14 @@ def main():
             "-v (--version) Display version information" \
             "-h (--help) Display this message"
             sys.exit(2)
-            
+                
     global bmtlog
-    bmtlog = logger(LOGFILE)
+    bmtlog = logger(LOGFILE,reloadid)
     
     tr = TestRunner()
     
     if reloadid:
-        #BUG. If reloading a non default HxW dataset plot titles will be build with default WxH labels. FIXED bmp.setconf
+        bmtlog.info('Reload dataset {}'.format(reloadid))
         tr.loadTestResults(reloadid)
         return
         
@@ -994,6 +1032,7 @@ def main():
                 sys.exit(0)
                 
     #tc,ts can be eithe all or rand identifiers or a combo of set|layer+id
+    bmtlog.info('Initial params TC:{} TS:{}'.format(tc,ts))
     tr.testMultiUser(tc,ts)
     return
     
