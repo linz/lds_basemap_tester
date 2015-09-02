@@ -71,7 +71,7 @@ VER = 1.0
 MAX_RETRY = 10
 ZMAX = 20
 ZMIN = 0
-USERS = 16
+USERS = 1
 LAND_THRESHOLD = 0.0005#0.0001 identifies ocean as parcel 0.001 cant find imagery in wlg_u/6 
 WIDTH = 7
 HEIGHT = 5
@@ -968,7 +968,8 @@ def setup():
     #B64A = encode({'user':u,'pass':p,'domain':d} if d else {'user':u,'pass':p})
 
 def main():
-    '''run test routines/simulations'''   
+    '''run test routines/simulations'''     
+    global USERS  
     reloadid = None
     tc,ts = DEF_TILE_COLLECTION,DEF_TILE_SET
     
@@ -990,7 +991,6 @@ def main():
             print VER
             sys.exit(0)
         elif opt in ("-u","--users"):
-            global USERS
             USERS = int(val)
         elif opt in ("-q","--sequential"):
             global PARA
@@ -1006,11 +1006,8 @@ def main():
         elif opt in ("-p","--proxy"):
             proxysetup(*val.split(':')) 
         elif opt in ("-s","--show"):
-            print 'WARNING. Generating tile map, reverting to single user'
             global SHOW
             SHOW = True
-            global USERS
-            USERS = 1 
         else:
             print "unrecognised option:\n" \
             "-u (--users) Number of users to simulate (thread count)." \
@@ -1037,6 +1034,10 @@ def main():
     global WHstr
     WHstr = str(WIDTH)+'x'+str(HEIGHT)
     
+    if SHOW and USERS>1:
+        print '*** WARNING. "-s" selected, generating tile map. Ignoring request for multiple {} users! ***'.format(USERS)
+        USERS = 1
+        
     if len(args)==0:
         usage()
         sys.exit(0)
