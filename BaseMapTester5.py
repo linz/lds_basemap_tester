@@ -17,7 +17,8 @@ Python script to query WMTS tile services on LDS recording tile fetch times over
 
 Usage:
 
-python BaseMapTester_old.py -u <simulated_users> [-w <width> -h <height>] [-r <reload_id>] [-v] [-h] {set|layer}<layer_id> 
+python BaseMapTester5.py -u <simulated_users> [-w <width> -h <height>] [-r <reload_id>] [-v] [-h] {set|layer}<layer_id>
+ 
     Arguments
     ---------
     An identifier indicating the set|layer you want to test 
@@ -25,12 +26,15 @@ python BaseMapTester_old.py -u <simulated_users> [-w <width> -h <height>] [-r <r
             
     Options
     -------
-    -u (--users) Number of users to simulate (thread count).
+    -u (--users) Number of users to simulate (thread count)
+    -q (--sequential) Run users in Sequence or Parallel
+    -p (--proxy) Use proxy with format host:port
     -h (--height) Number of tiles to fetch, vertical. Default=5
     -w (--width) Number of tiles to fetch, horizontal. Default=7
-    -r (--reload) Reload/Replot a previously saved test.
+    -r (--reload) Reload/Replot a previously saved test
     -v (--version) Display version information
-    -i (--info) Display this message"
+    -i (--info) Display this message
+    -s (--show) Generate tile-success thumbnails. (Sets users to 1)
 
 NB.1 API Keys (when enabled) should be saved in a file called ".key" in the same directory where this program is run.
 this file should use the format key=ABCDEFGHIJKLIMNOPQRSTUVWXYZ12345678
@@ -40,7 +44,7 @@ from urllib2 import HTTPError, base64, ProxyHandler
 from datetime import datetime as DT, datetime
 #from functools import wraps
 
-import Image, ImageStat
+import Image, ImageStat, ImageDraw
 import urllib2
 import StringIO
 import random
@@ -75,8 +79,11 @@ WHstr = str(WIDTH)+'x'+str(HEIGHT)
 KEY = ''
 B64A = ''
 PARA = True
-SHOW = True
+SHOW = False
 NON_PC_LYR = 0
+
+#Tile thumbnail size
+TSIZE = 64
 
 LOGFILE = 'BMT'
 DEF_TILE_COLLECTION = 'RAND'#'basemap'
@@ -703,11 +710,10 @@ class BaseMapResult(object):
     @classmethod        
     def _showTileArray(cls,tilearray):
         '''Static debugging method to show tile tracking progress'''
-        size = 64
         z = tilearray.keys()[0][2]
-        screensize = min(size*pow(2,z),size*WIDTH),min(size*pow(2,z),size*HEIGHT)
+        screensize = min(TSIZE*pow(2,z),TSIZE*WIDTH),min(TSIZE*pow(2,z),TSIZE*HEIGHT)
         screen = Image.new('RGB',screensize,'grey')
-        blank = Image.new('RGB',2*(size,),'white')
+        blank = Image.new('RGB',2*(TSIZE,),'white')
         
         xx = sorted(set([a[0] for a in tilearray.keys()]))
         yy = sorted(set([a[1] for a in tilearray.keys()]))
@@ -716,18 +722,30 @@ class BaseMapResult(object):
             for y in yy:
                 print tilearray[(x,y,z)]['url']
                 img = tilearray[(x,y,z)]['img']
-                img.thumbnail(2*(size,))
+                img.thumbnail(2*(TSIZE,))
                 if tilearray[(x,y,z)]['mn']>LAND_THRESHOLD:
-                    screen.paste(img,(x*size,y*size))
+                    screen.paste(img,((x-min(xx))*TSIZE,(y-min(yy))*TSIZE))
                 else:
-                    screen.paste(blank,(x*size,y*size))
+                    screen.paste(blank,((x-min(xx))*TSIZE,(y-min(yy))*TSIZE))
                 #if tilearray[(x,y,z)]['mn']>LAND_THRESHOLD:
                 #    line += '+'
                 #else: line += '-'
             #print line
-        fn = '{}{}/{}.png'.format(FPATH,TSTAMP,'.'.join([i[0]+str(i[1]) for i in zip('XYZ',tilearray.keys()[0])]))
+        fn = '{}{}/grid_{}.png'.format(FPATH,TSTAMP,'.'.join([i[0]+str(i[1]) for i in zip('XYZ',tilearray.keys()[0])]))
+        BaseMapResult._overlayTileGrid(screen)
         screen.save(fn)
         #screen.show()
+        
+    @classmethod
+    def _overlayTileGrid(cls,img):
+        xx,yy = img.size
+        draw = ImageDraw.Draw(img)
+        #verts
+        for x in range(0,xx,TSIZE):
+            draw.line((x,0, x,yy), fill=128)
+        for y in range(0,yy,TSIZE):
+            draw.line((0,y, xx,y), fill=128)
+            
         
     #@classmethod
     #def flatten(cls,lis):
@@ -974,7 +992,7 @@ def main():
         elif opt in ("-u","--users"):
             global USERS
             USERS = int(val)
-        elif opt in ("-s","--sequential"):
+        elif opt in ("-q","--sequential"):
             global PARA
             PARA = False
         elif opt in ("-r","--reload"):
@@ -987,16 +1005,23 @@ def main():
             WIDTH = int(val) 
         elif opt in ("-p","--proxy"):
             proxysetup(*val.split(':')) 
+        elif opt in ("-s","--show"):
+            print 'WARNING. Generating tile map, reverting to single user'
+            global SHOW
+            SHOW = True
+            global USERS
+            USERS = 1 
         else:
             print "unrecognised option:\n" \
             "-u (--users) Number of users to simulate (thread count)." \
-            "-s (--sequential) Run users in Sequence or Parallel." \
+            "-q (--sequential) Run users in Sequence or Parallel." \
             "-p (--proxy) Use proxy with format host:port."  \
             "-h (--height) Number of tiles to fetch, vertical. Default=5" \
             "-w (--width) Number of tiles to fetch, horizontal. Default=7" \
-            "-r (--replay) Reload/Replot a previously saved test." \
+            "-r (--reload) Reload/Replot a previously saved test." \
             "-v (--version) Display version information" \
-            "-h (--help) Display this message"
+            "-i (--info) Display this message" \
+            "-s (--show) Generate tile-success thumbnails. (Sets users to 1)"
             sys.exit(2)
                 
     global bmtlog
