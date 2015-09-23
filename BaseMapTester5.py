@@ -35,9 +35,23 @@ python BaseMapTester5.py -u <simulated_users> [-w <width> -h <height>] [-r <relo
     -v (--version) Display version information
     -i (--info) Display this message
     -s (--show) Generate tile-success thumbnails. (Sets users to 1)
+    
+NB.0
+setXXX keyword selects a numbered set
+layerYYY keyword selects a numbered layer
+ref keyword allows users to select collection/set directly from config array
+file keyword allows user to predefine sets and layers in a named file
 
 NB.1 API Keys (when enabled) should be saved in a file called ".key" in the same directory where this program is run.
 this file should use the format key=ABCDEFGHIJKLIMNOPQRSTUVWXYZ12345678
+
+NB.2
+examples
+-u 16 layer1571 #16 users reading layer 1571 parcels
+-u 8 refparcelParcel_81#8 users reading parcel layer and with Parcel_81 style
+-u 1 -s refbasemapColour #1 user reading basemap colour with default style also generating tile thumbnails
+-r 150831_140218 #Reload data for run on 31/8/2015 at 2:02pm 
+-u 1 fileLayerSelection.txt #1 user realing the layers listed in the file SampleLayers.txt
 '''
 
 from urllib2 import HTTPError, base64, ProxyHandler
@@ -85,6 +99,7 @@ NON_PC_LYR = 0
 #Tile thumbnail size
 TSIZE = 64
 
+ARG_PREFIXES = ('set','layer','file','ref')
 LOGFILE = 'BMT'
 DEF_TILE_COLLECTION = 'RAND'#'basemap'
 DEF_TILE_SET = 'RAND'#'colour'
@@ -108,7 +123,7 @@ UU = {'imagery'  :{'url':STU,
                   'ii':Z3I},
       'basemap'  :{'url':STU,
                   'tms':'EPSG:3857',
-                  'sl':{'Colour':(37,73),'Greyscale':(36,72)},
+                  'sl':{'Colour':(37,73),'Greyscale':(36,72)},#73
                   'ii':Z0I},
       'rural_nth':{'url':LY1,
                   'tms':'',
@@ -229,6 +244,7 @@ class TestRunner(object):
     
         bmp.dump()
         bmr.show()
+        return True
         
     def loadTestResults(self,ref): 
         bmp = BaseMapPickle(ref)
@@ -268,18 +284,21 @@ class TestRunner(object):
     @classmethod
     def parseUserArgsList(cls,tc,ts):
         '''Translates set|layer### to basemap|imagery... & Auckland_R|Timaru_U... format'''
-        #get subsets for set/layer, find coll containing ts, find set containing ts
-        if re.match('file', tc, re.IGNORECASE):
+        #FILE# get subsets for set/layer, find coll containing ts, find set containing ts
+        if re.match(ARG_PREFIXES[2], tc, re.IGNORECASE):
             lines = ()
             with open(ts) as handle:
                 for entry in handle.readlines():
-                    mat = re.match('(set|layer)(\d+)',entry)
+                    #read lines from the file in the format layerAAA\nsetBBB etc
+                    mat = re.match('({})(\d+)'.format(ARG_PREFIXES[:2]),entry)
                     if mat: lines += (TestRunner.parseUserArgs(mat.group(1),mat.group(2)),)
             global USERS
             USERS = len(lines)
             return lines
-        elif re.match('ref', tc, re.IGNORECASE):
+        #REF# get named layers/styles eg ref(parcel)(Parcel_81)
+        elif re.match(ARG_PREFIXES[3], tc, re.IGNORECASE):
             return (TestRunner.validateUserArgs(tc,ts),)*USERS
+        #SET|LAYER#
         else:
             return (TestRunner.parseUserArgs(tc,ts),)*USERS
 
@@ -731,7 +750,7 @@ class BaseMapResult(object):
                 #    line += '+'
                 #else: line += '-'
             #print line
-        fn = '{}{}/grid_{}.png'.format(FPATH,TSTAMP,'.'.join([i[0]+str(i[1]) for i in zip('XYZ',tilearray.keys()[0])]))
+        fn = '{}{}/grid_{}.png'.format(FPATH,TSTAMP,'.'.join(['{0}{1:02d}'.format(i[0],i[1]) for i in zip('ZXY',[tilearray.keys()[0][j] for j in (2,0,1)] )]))
         BaseMapResult._overlayTileGrid(screen)
         screen.save(fn)
         #screen.show()
@@ -959,17 +978,17 @@ def proxysetup(host,port):
     #print 'Installing proxy',host,port
     urllib2.install_opener(opener)
     
-def setup():
+def setup(k=None):
     '''Do any GLOBAL settings'''
     global KEY
-    KEY = apikey(akf)
+    KEY = apikey(k if k else akf)
     
     #global B64A
     #B64A = encode({'user':u,'pass':p,'domain':d} if d else {'user':u,'pass':p})
 
 def main():
     '''run test routines/simulations'''     
-    global USERS  
+    global USERS
     reloadid = None
     tc,ts = DEF_TILE_COLLECTION,DEF_TILE_SET
     
@@ -1045,7 +1064,7 @@ def main():
     else:
         
         for arg in args:
-            argmatch = re.match('(set|layer|file|ref)(\d+|\w+)', arg, re.IGNORECASE)
+            argmatch = re.match('({})(\d+|\w+)'.format('|'.join(ARG_PREFIXES)), arg, re.IGNORECASE)
             if arg.lower() in ("rand", "random"):
                 tc,ts = 'RAND','RAND'
             elif arg.lower() in ("all",):
