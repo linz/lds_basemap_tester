@@ -17,7 +17,8 @@ Python script to query WMTS tile services on LDS recording tile fetch times over
 
 Usage:
 
-python BaseMapTester_old.py -u <simulated_users> [-w <width> -h <height>] [-r <reload_id>] [-v] [-h] {set|layer}<layer_id> 
+python BaseMapTester5.py -u <simulated_users> [-w <width> -h <height>] [-r <reload_id>] [-v] [-h] {set|layer}<layer_id>
+ 
     Arguments
     ---------
     An identifier indicating the set|layer you want to test 
@@ -25,21 +26,39 @@ python BaseMapTester_old.py -u <simulated_users> [-w <width> -h <height>] [-r <r
             
     Options
     -------
-    -u (--users) Number of users to simulate (thread count).
+    -u (--users) Number of users to simulate (thread count)
+    -q (--sequential) Run users in Sequence or Parallel
+    -p (--proxy) Use proxy with format host:port
     -h (--height) Number of tiles to fetch, vertical. Default=5
     -w (--width) Number of tiles to fetch, horizontal. Default=7
-    -r (--reload) Reload/Replot a previously saved test.
+    -r (--reload) Reload/Replot a previously saved test
     -v (--version) Display version information
-    -i (--info) Display this message"
+    -i (--info) Display this message
+    -s (--show) Generate tile-success thumbnails. (Sets users to 1)
+    
+NB.0
+setXXX keyword selects a numbered set
+layerYYY keyword selects a numbered layer
+ref keyword allows users to select collection/set directly from config array
+file keyword allows user to predefine sets and layers in a named file
 
-NB.1 API Keys (when enabled) should be saved in a file called ".key" in the same directory where this program is run
+NB.1 API Keys (when enabled) should be saved in a file called ".key" in the same directory where this program is run.
+this file should use the format key=ABCDEFGHIJKLIMNOPQRSTUVWXYZ12345678
+
+NB.2
+examples
+-u 16 layer1571 #16 users reading layer 1571 parcels
+-u 8 refparcelParcel_81#8 users reading parcel layer and with Parcel_81 style
+-u 1 -s refbasemapColour #1 user reading basemap colour with default style also generating tile thumbnails
+-r 150831_140218 #Reload data for run on 31/8/2015 at 2:02pm 
+-u 1 fileLayerSelection.txt #1 user realing the layers listed in the file SampleLayers.txt
 '''
 
 from urllib2 import HTTPError, base64, ProxyHandler
-from datetime import datetime as DT
+from datetime import datetime as DT, datetime
 #from functools import wraps
 
-import Image, ImageStat
+import Image, ImageStat, ImageDraw
 import urllib2
 import StringIO
 import random
@@ -56,110 +75,111 @@ import numpy as NP
 
 #from mpl_toolkits.basemap import Basemap
 import matplotlib.pyplot as PP
-import matplotlib.dates as MDT
 import matplotlib as mpl
-from radialnet.core import ArgvHandle
 
 class ImpossibleZoomLevelCoordinate(Exception): pass
 class UnknownLandTypeRequest(Exception): pass
+class UnknownConfigLayerRequest(Exception): pass
+class MismatchedConfiguration(Exception): pass
 
 VER = 1.0
-MAX_RETRY = 3
+MAX_RETRY = 10
 ZMAX = 20
 ZMIN = 0
-USERS = 16
+USERS = 1
 LAND_THRESHOLD = 0.0005#0.0001 identifies ocean as parcel 0.001 cant find imagery in wlg_u/6 
 WIDTH = 7
 HEIGHT = 5
 WHstr = str(WIDTH)+'x'+str(HEIGHT)
 KEY = ''
 B64A = ''
+PARA = True
+SHOW = False
+NON_PC_LYR = 0
+MULTI = 'multi'
+PTH_DELIM = '.'
 
-LOGFILE = 'basemaptst.log'
+#Tile thumbnail size
+TSIZE = 64
+
+ARG_PREFIXES = ('set','layer','file','ref')
+LOGFILE = 'BMT'
 DEF_TILE_COLLECTION = 'RAND'#'basemap'
 DEF_TILE_SET = 'RAND'#'colour'
 
+#Default starting zoomlevel and start tiles
+Z0I = ((0,20,0,0),)
+Z3I = ((3,20,7,5),(3,20,7,4))
 
 #in LY2 replace {id} with {id},{style} if we figure out what style means
 STU = 'http://tiles-{cdn}.data-cdn.linz.govt.nz/services;key={k}/tiles/v4/set={id}{style}/{TileMatrixSet}/{TileMatrix}/{TileCol}/{TileRow}.png'
 LY1 = 'http://tiles-{cdn}.data-cdn.linz.govt.nz/services;key={k}/tiles/v4/layer={id}{style}/{TileMatrixSet}{TileMatrix}/{TileCol}/{TileRow}.png'
 LY2 = 'https://{cdn}.tiles.data.linz.govt.nz/services;key={k}/tiles/v4/layer={id}{style}/{TileMatrixSet}/{TileMatrix}/{TileCol}/{TileRow}.png'
 GCU = 'https://data.linz.govt.nz/services;key={k}/wmts/1.0.0/set/{set}/WMTSCapabilities.xml'
+#      type-refname = tc: url=tile URL
+#                     tms=TileMatrixSet parameter
+#                     sl=layer-refname=(layer-id, [style-id])
+#                     ii=startcoordinates=z-start,z-end,x-start,ystart)
 UU = {'imagery'  :{'url':STU,
                   'tms':'EPSG:3857',
-                  'sl':{'National':2,},
-                  'st':'',
-                  'ii':((3,20,7,5),(3,20,7,4))},
-#       'basemap'  :{'url':STU,
-#                   'tms':'EPSG:3857',
-#                   'sl':{'Colour':37,'Greyscale':36},
-#                   'st':'',
-#                   'ii':((0,20,0,0),)},
-      'base_b&w' :{'url':STU,
+                  'sl':{'National':(2,),},
+                  'ii':Z3I},
+      'basemap'  :{'url':STU,
                   'tms':'EPSG:3857',
-                  'sl':{'Greyscale':36,},
-                  'st':',style=72',
-                  'ii':((0,20,0,0),)},
-      'base_col' :{'url':STU,
-                  'tms':'EPSG:3857',
-                  'sl':{'Colour':37,},
-                  'st':',style=73',
-                  'ii':((0,20,0,0),)},
+                  'sl':{'Colour':(37,73),'Greyscale':(36,72)},#73
+                  'ii':Z0I},
       'rural_nth':{'url':LY1,
                   'tms':'',
-                  'sl':{'Northland_R':1918,},
-                  'st':'',
+                  'sl':{'Northland_R':(1918,),},
                   'ii':((5,19,31,19),)},        
       'rural_akl':{'url':LY1,
                   'tms':'',
-                  'sl':{'Auckland_R':1769,},
-                  'st':'',
+                  'sl':{'Auckland_R':(1769,),},
                   'ii':((4,19,15,9),)},
       'rural_ctl':{'url':LY1,
                   'tms':'',
-                  'sl':{'Wellington_R':1870,'Manawatu_R':1767,'HawkesBay_R':1778,'BayOfPlenty_R':1757,'Taranaki_R':1869,'Waikato_R':1872},
-                  'st':'',
+                  'sl':{'Wellington_R':(1870,),'Manawatu_R':(1767,),'HawkesBay_R':(1778,),'BayOfPlenty_R':(1757,),'Taranaki_R':(1869,),'Waikato_R':(1872,)},
                   'ii':((3,19,7,5),)},
       'rural_est':{'url':LY1,
                   'tms':'',
-                  'sl':{'Gisborne_R':1722,},
-                  'st':'',
+                  'sl':{'Gisborne_R':(1722,),},
                   'ii':((4,19,15,9),)},
       'urban_akl':{'url':LY1,
                   'tms':'',
-                  'sl':{'NorthShore_U':1866,},
-                  'st':'',
+                  'sl':{'NorthShore_U':(1866,),},
                   'ii':((6,19,63,39),)},
       'urban_wlg':{'url':LY1,
                   'tms':'',
-                  'sl':{'Wellington_U':1871,},
-                  'st':'',
+                  'sl':{'Wellington_U':(1871,),},
                   'ii':((6,19,63,40),)},
       'urban_chc':{'url':LY1,
                   'tms':'',
-                  'sl':{'Christchurch_U':1932,},
-                  'st':'',
+                  'sl':{'Christchurch_U':(1932,),},
                   'ii':((7,19,125,81),)},
       'urban_tmu':{'url':LY1,
                   'tms':'',
-                  'sl':{'Timaru_U':1927,},
-                  'st':'',
+                  'sl':{'Timaru_U':(1927,),},
                   'ii':((7,19,124,81),)},
       'urban_bop':{'url':LY2,
                    'tms':'',
-                   'sl':{'BayOfPlenty_U':1753,},
-                   'st':'',
+                   'sl':{'BayOfPlenty_U':(1753,),},
                    'ii':((5,19,31,19),)},
-    'prcl_wfm' :{'url':LY1,
-                'tms':'',
-                'sl':{'Parcel':1571},
-                'st':',style=81',
-                'ii':((0,20,0,0),)}
-#     'prcl_col' :{'url':LY1,
-#                 'tms':'',
-#                 'sl':{'Parcel':1571},
-#                 'st':',style=82',
-#                 'ii':((0,20,0,0),)}
+      'parcel'  :{'url':LY1,
+                  'tms':'',
+                  'sl':{'Parcel_81':(1571,81),'Parcel_82':(1571,82),'Parcel':(1571,),},
+                  'ii':Z0I},      
+      'pset'    :{'url':STU,
+                  'tms':'',
+                  'sl':{'wireframe':(69,),},
+                  'ii':Z3I},
+      'topo'    :{'url':LY1,
+                  'tms':'',
+                  'sl':{'t50':(767,),'t250':(798,)},
+                  'ii':Z0I},
+      'default' :{'url':LY1,
+                  'tms':'',
+                  'sl':{'layer':(0,),'set':(0,),},
+                  'ii':Z0I},
       }
 
 
@@ -167,8 +187,8 @@ UU = {'imagery'  :{'url':STU,
 akf = '.key'
 sty = 'auto'
 
-fpath = ''
-tstamp = '{0:%y%m%d_%H%M%S}'.format(DT.now())
+FPATH = ''
+TSTAMP = '{0:%y%m%d_%H%M%S}'.format(DT.now())
 bmtlog = None#logging.getLogger(None)
 
 #-------------------------------------------------------------------------------------------
@@ -185,8 +205,10 @@ class TestRunner(object):
         bmtlog.info('Config parameters {}/{}'.format(tc,ts))
         
         if ts=='ALL' or tc=='ALL':
+            #all configured layers
             rcs = TestRunner.getEveryTileSet() 
         elif ts=='RAND' or tc=='RAND':
+            #randomly from all configured layers
             rcs = TestRunner.getRandomTileSet()
         else:
             rcs = TestRunner.parseUserArgsList(tc,ts)
@@ -194,25 +216,30 @@ class TestRunner(object):
         bmtlog.info('Client connections {}'.format(USERS))
         bmtlog.info('Layer request list {}'.format(rcs))
         
+
         ioq = {'in':Queue.Queue(),'out':Queue.Queue()}
         for ref,(rtc,rts) in enumerate(rcs):
             ioq['in'].put(ref)
-            bmt = BaseMapTester(ioq['in'],ioq['out'])
+            bmt = BaseMapTester('{}-{}'.format(tc,ts),ioq['in'],ioq['out'])
                 
-            print 'TCTS',ref,rtc,rts
+            print 'TCTS',ref,rtc,rts, NON_PC_LYR if NON_PC_LYR else '' 
             zinit = random.choice(UU[rtc]['ii']) if len(UU[rtc]['ii'])>1 else UU[rtc]['ii'][0]
             bmt.setup(rtc,rts,*zinit)
             bmt.setDaemon(True)
             bmt.start()
-          
-        ioq['in'].join()
-        ioq['out'].join()
+            if not PARA:  
+                ioq['in'].join()
+                ioq['out'].join()
+                
+        if PARA:  
+            ioq['in'].join()
+            ioq['out'].join()
         
         print 'All queues joined'
         
-        bmr = BaseMapResult(tstamp)
-        bmp = BaseMapPickle(tstamp)
-        bmp.setconf({'height':HEIGHT,'width':WIDTH})
+        bmr = BaseMapResult(TSTAMP)
+        bmp = BaseMapPickle(TSTAMP)
+        bmp.setconf({'height':HEIGHT,'width':WIDTH,'npcl':NON_PC_LYR})
         while not ioq['out'].empty():
             qe = ioq['out'].get()
             bmp.append(qe)
@@ -220,17 +247,74 @@ class TestRunner(object):
     
         bmp.dump()
         bmr.show()
-        
+        return True    
+    
     def loadTestResults(self,ref): 
         bmp = BaseMapPickle(ref)
         data = bmp.load()
-        h,w = bmp.getconf()
+        self.setHWL(*bmp.getconf())
+        bmr = BaseMapResult(ref,data)
+        bmr.show()
+        
+    def _rebuildResults(self,ref):
+        '''rebuilds plots from single or multiple backups'''
+        data,hwl = {},()
+        if isinstance(ref,(list,tuple)):
+            for r in ref:                    
+                bmp = BaseMapPickle(r)
+                data[r] = bmp.load()
+                hwl += (bmp.getconf(),)
+            #make sure we're comparing similar layers and similar dimensions
+            if len(set(hwl))>1 or len(set([(cs[0],cs[1]) for cs in [dx[0] for dx in data.values()]]))>1: raise MismatchedConfiguration()
+            data = self.flattenResults(self.mergeResults(data))
+            self.setHWL(*list(set(hwl))[0])
+        else:
+            bmp = BaseMapPickle(ref)
+            data[ref] = bmp.load()
+            self.setHWL(*bmp.getconf())
+        bmr = BaseMapResult(ref,self.sortData(data))
+        bmr.show()
+        
+    def mergeResults(self,d1):
+        '''merge multiple results into a single dataset effectively merging different timestamps as additional users/threads'''
+        d2 = {}
+        for tset in d1:
+            for t1 in d1[tset]:
+                t2 = ()
+                for p1 in  t1[2]:
+                    #append tset name to ref
+                    p2 = ('{}-u{}'.format(tset,p1[0]),)+p1[1:]
+                    #print 'p1',p1,'-> p2',p2
+                    t2 += (p2,)
+                t2 = t1[:2]+(t2,)
+                #print 't1',t1,'-> t2',t2
+                d2[tset] = [t2,]
+            #print 'd1',d1,'-> d2',d2
+        return d2
+    
+    def flattenResults(self,d1):
+        '''Combines multi day results into single dataset'''
+        d2 = {}
+        for d_t in d1:
+            if d2.has_key(MULTI): d2[MULTI] += d1[d_t]
+            else: d2[MULTI] = d1[d_t]
+        return d2
+
+    def sortData(self,d1):
+        d2 = {}
+        for d_t in d1:
+            d2[d_t] = sorted(d1[d_t])
+        return d2
+        
+    def setHWL(self,h,w,l):
+        '''Sets global variables Height,Width and the layer flag'''
         global HEIGHT
         HEIGHT = h
         global WIDTH
         WIDTH = w
-        bmr = BaseMapResult(ref,data)
-        bmr.show()
+        global NON_PC_LYR
+        NON_PC_LYR = l
+        
         
     @classmethod
     def getEveryTileSet(cls):
@@ -257,27 +341,53 @@ class TestRunner(object):
     @classmethod
     def parseUserArgsList(cls,tc,ts):
         '''Translates set|layer### to basemap|imagery... & Auckland_R|Timaru_U... format'''
-        #get subsets for set/layer, find coll containing ts, find set containing ts
-        if re.match('file', tc, re.IGNORECASE):
+        #FILE# get subsets for set/layer, find coll containing ts, find set containing ts
+        if re.match(ARG_PREFIXES[2], tc, re.IGNORECASE):
             lines = ()
             with open(ts) as handle:
                 for entry in handle.readlines():
-                    mat = re.match('(set|layer)(\d+)',entry)
+                    #read lines from the file in the format layerAAA\nsetBBB etc
+                    mat = re.match('({})(\d+)'.format(ARG_PREFIXES[:2]),entry)
                     if mat: lines += (TestRunner.parseUserArgs(mat.group(1),mat.group(2)),)
             global USERS
             USERS = len(lines)
             return lines
+        #REF# get named layers/styles eg ref(parcel)(Parcel_81)
+        elif re.match(ARG_PREFIXES[3], tc, re.IGNORECASE):
+            return (TestRunner.validateUserArgs(tc,ts),)*USERS
+        #SET|LAYER#
         else:
             return (TestRunner.parseUserArgs(tc,ts),)*USERS
 
     @classmethod
     def parseUserArgs(cls,tc,ts):        
-        '''Translates set|layer### to basemap|imagery... & Auckland_R|Timaru_U... format'''
+        '''Translates set|layer### to basemap|imagery... & Auckland_R|Timaru_U... format. NB Not so useful when style parameter is used'''
+        #check whether user wants named configured collections or set/layer specifics
+        
         #get subsets for set/layer, find coll containing ts, find set containing ts
-        UUs = {u:v for u,v in UU.items() if tc in v['url']}
-        x = [(u,v['sl']) for u,v in UUs.items() if int(ts) in v['sl'].values()]
-        y = [i for i,j in x[0][1].items() if j == int(ts)]
+        UUs = {u:v for u,v in UU.items() if tc in v['url']}#sets or layers
+        x = [(u,v['sl']) for u,v in UUs.items() if int(ts) in [w[0] for w in v['sl'].values()]]
+        #x = [(u,v) for u,v in x0 if int(ts) in [w[0] for w in v.values()]]
+        #sort the tset results so the shortest result gets picked first, conventionally the one without style
+        if x:
+            y = sorted([i for i,j in x[0][1].items() if int(ts) in j])
+        else:
+            #if there is no x the layer/set wasnt found so return defaults
+            global NON_PC_LYR
+            NON_PC_LYR = ts
+            return 'default', 'layer'
         return x[0][0],y[0]#x[1][0].y[0]
+    
+    @classmethod
+    def validateUserArgs(self,r1,r2):
+        '''If user provides configured name and layer make sure it exists in config array'''
+        #r1=ref,r2=parcelSomething
+        m1 = re.match('('+'|'.join(UU.keys())+')(\w+)',r2,re.IGNORECASE)
+        if m1 and m1.group(2) in UU[m1.group(1)]['sl'].keys():
+            return m1.group(1),m1.group(2)
+        msg = 'Invalid Set/Layer Reference{}/{}'.format(r1,r2)
+        bmtlog.critical(msg)
+        raise UnknownConfigLayerRequest(msg)
     
 class BaseMapPickle(object):
     
@@ -295,21 +405,22 @@ class BaseMapPickle(object):
             self.data[k] = conf[k]
         
     def getconf(self):
-        return self.data['height'],self.data['width']
+        return self.data['height'],self.data['width'],self.data['npcl']
         
     def dump(self):
-        pdir = '{}{}'.format(fpath,self.ref)
-        if not os.path.exists(pdir): os.mkdir(pdir)
+        pdir = '{}{}'.format(FPATH,self.ref)
+        if not os.path.exists(pdir): os.mkdir(pdir.replace(',',PTH_DELIM))
         pickle.dump(self.data,open('{}/{}.p'.format(pdir,self.ref),'wb'))
         
     def load(self):
-        self.data = pickle.load(open('{}{}/{}.p'.format(fpath,self.ref,self.ref),'rb'))
+        self.data = pickle.load(open('{}{}/{}.p'.format(FPATH,self.ref,self.ref),'rb'))
         return self.data['data']
         
 class BaseMapTester(threading.Thread):
     
-    def __init__(self,inq,outq):
+    def __init__(self,ref,inq,outq):
         threading.Thread.__init__(self)
+        self.ref = ref
         self.inq = inq
         self.outq = outq
         self._stop = threading.Event()
@@ -342,16 +453,20 @@ class BaseMapTester(threading.Thread):
         self.outq.task_done()
     
     def testBaseMap(self,ref):
-        dlist = ((ref,self.zmin,DT.now(),(0,0,0,0,0)),)
+        referenceno = '{}.{}'.format(self.ref,ref)
+        dlist = ((referenceno,self.zmin,DT.now(),(0,0,0,0,0,0)),)
         tlist = {}
         xyz = (self.xinit,self.yinit,self.zmin)
         mr = MapRange(ref,self.tcol,self.tset)
         retry = 0
-        for zlev in range(self.zmin,self.zmax):
+        zlev = self.zmin
+        while zlev<self.zmax:
             nbrs = mr.getNeighbours(*xyz,width=WIDTH,height=HEIGHT)#get WxH tileset coords
             tlist[zlev] = mr.getAllTiles(nbrs)
+            if SHOW: BaseMapResult._showTileArray(tlist[zlev])
     
             landkeys = [zk for zk in tlist[zlev] if tlist[zlev][zk]['mn'] > LAND_THRESHOLD and tlist[zlev][zk]['ex']]
+            fail429 = len([zk for zk in tlist[zlev] if tlist[zlev][zk]['er']==429])
             fail500 = len([zk for zk in tlist[zlev] if tlist[zlev][zk]['er']==500])
             fail503 = len([zk for zk in tlist[zlev] if tlist[zlev][zk]['er']==503])
             failXXX = len([zk for zk in tlist[zlev] if tlist[zlev][zk]['er'] and tlist[zlev][zk]['er']<>500 and tlist[zlev][zk]['er']<>503])
@@ -367,28 +482,32 @@ class BaseMapTester(threading.Thread):
                 xyz = mr.translate(*xyz)
             elif retry<MAX_RETRY:
                 retry += 1
-                print '{}# z={} c={},t={} - Shift {}'.format(ref,zlev,xyz,len(landkeys),retry)
-                bmtlog.debug('{}# z={} c={},t={} - Shift {}'.format(ref,zlev,xyz,len(landkeys),retry))
+                print '{}# z={} c={},t={} - Shift and Retry {}'.format(ref,zlev,xyz,len(landkeys),retry)
+                bmtlog.debug('{}# z={} c={},t={} - Shift and Retry {}'.format(ref,zlev,xyz,len(landkeys),retry))
                 xyz = mr.shift(*xyz)
+                zlev = xyz[2]
             else: 
                 print '{}# z={} c={} t=0 - No Land Tiles'.format(ref,zlev,xyz)
                 bmtlog.debug('{}# z={} c={} t=0 - Quit'.format(ref,zlev,xyz))
                 bmtlog.error('Test Aborted - at Z={}'.format(zlev))
                 return dlist
                 #self.close()
+            zlev += 1
 
-            dlist += ((ref,zlev+1,DT.now(),(fail500,fail503,failXXX,zero,len(landkeys))),)
+            dlist += ((ref,zlev+1,DT.now(),(fail429,fail500,fail503,failXXX,zero,len(landkeys))),)
         bmtlog.info('{}# Test Complete - at Z={}'.format(ref,zlev))
         return dlist
     
 class BaseMapResult(object):
     def __init__(self,ref,res=[]):
-        self.ref = ref
-        self.res = sorted(res)
-        self.setup()
+        #pylint: disable=E1103
+        self.ur,self.ref = ('r','.'.join(ref)) if isinstance(ref,(list,tuple)) else ('u',ref)
+        if res: 
+            self.res = res[MULTI] if isinstance(res,dict) and res.has_key(MULTI) else res.values()[0]
+            self.setup()
+        else:
+            self.res = res
 
-       
-    
     def setup(self):
         mpl.rc('lines',linewidth=2)
         mpl.rc('font',size=10)
@@ -401,7 +520,9 @@ class BaseMapResult(object):
         self.fig = PP.figure()
 
         
-        
+    def offsetX(self,xx):
+        return [x-1 for x in xx]
+    
     def append(self,res):
         self.res.append(res)
         self.setup()
@@ -414,36 +535,43 @@ class BaseMapResult(object):
         self.plotRawUserTimeMedianDiff()
         self.plotTimeDeltaHist()
         self.plotTileCounts()
-        self.plot2DHistZoomTime()
+        #self.plot2DHistZoomTime() since implementing non numeric ref values this no longer works
+        self.generateCSV()
         
+    def _legend(self,j,seq,t=None):
+        extra = '-'+NON_PC_LYR if NON_PC_LYR else ''
+        if t: return 't{}-{}{}'.format(t[seq][0],seq,extra)
+        return '{}{}-{}-{}{}'.format(self.ur,j,seq[0],seq[1],extra)
+    
     def plotRawUserTimeLine(self):
-        fn = '{}{}/rawtime_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/rawtime_{}.png'.format(FPATH,self.ref,self.ref)
         b = {}
-        t = ()
+        lgd = ()
         zero = DT(2000,1,1)
         for j,sequence in enumerate(self.res):
             minseq = min(sequence[2])
-            t += ('{}-{}-{}'.format(j,sequence[0],sequence[1]),)
+            lgd += (self._legend(j,sequence),)
             X = [i[1] for i in sequence[2]]
             #Y = [MDT.date2num(zero+(v[2]-minseq[2])) for v in sequence[2]]
             Y = [zero+(v[2]-minseq[2]) for v in sequence[2]]
             #xy = [(x,y) for x,y in zip(X,Y)]
-            b[i] = PP.plot(X,Y)#,color=self.colours[i])
-        PP.legend(([b[bi][0] for bi in b]),t,loc=2)
-        PP.title('Raw Zoom Timing / Res({}), User({})'.format(WHstr,USERS))
+            b[i] = PP.plot(self.offsetX(X),Y)#,color=self.colours[i])
+        PP.legend(([b[bi][0] for bi in b]),lgd,loc=2)
+        PP.title('Raw Zoom Timing / Res({}), User({}{})'.format(WHstr,USERS,'p' if PARA else 's'))
         PP.xlabel('zoom level')
         PP.ylabel('time (h:m:s)')
         self._output(PP,fn)
+        self.fig.clear()
         
     def plotRawUserTimeDiff(self): 
         #TODO. shift diff values left to x=0
-        fn = '{}{}/rawdiff_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/rawdiff_{}.png'.format(FPATH,self.ref,self.ref)
         b = {}
         lgd = ()
         prev = [(x,y) for x,y in zip(range(self.reslen),self.reslen*[0,])][1:]
         for j,sequence in enumerate(self.res):
             #title
-            lgd += ('{}-{}-{}'.format(j,sequence[0],sequence[1]),)
+            lgd += (self._legend(j,sequence),)
             #extract and diff y values
             p1 = [v[2] for v in sequence[2]]
             p2 = p1[1:]
@@ -454,18 +582,19 @@ class BaseMapResult(object):
             #set base value for seq
             B = [y for x,y in self.align(xy,prev)]
             #plot bar
-            b[j] = PP.bar(X,Y,bottom=B,color=self.colours[j])
+            b[j] = PP.bar(self.offsetX(X),Y,bottom=B,color=self.colours[j])
             #store new stack value
             prev = self.stack(xy,prev)
         #-----------------------------
         PP.legend(([b[bi][0] for bi in b]),lgd,loc=2)
-        PP.title('Raw Zoom Time Differences / Res({}), User({})'.format(WHstr,USERS))
+        PP.title('Raw Zoom Time Differences / Res({}), User({}{})'.format(WHstr,USERS,'p' if PARA else 's'))
         PP.xlabel('zoom level')
         PP.ylabel('time (seconds)')
         self._output(PP,fn)
+        self.fig.clear()
         
     def plotRawUserTimeAverageDiff(self): 
-        fn = '{}{}/avgdiff_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/avgdiff_{}.png'.format(FPATH,self.ref,self.ref)
         b = {}
         t = dict()
         lgd = ()
@@ -486,22 +615,24 @@ class BaseMapResult(object):
                 t[k] = (1,xy)
 
         for j,seq2 in enumerate(t):
-            lgd += ('{}/{}'.format(seq2,t[seq2][0]),)
+            #lgd += ('{}/{}'.format(seq2,t[seq2][0]),)
+            lgd += (self._legend(j,seq2,t),)
             shift = 1.0/len(t)
             #calculate bar width and average Y values/clients
             X2 = [i[0]+(j*shift) for i in t[seq2][1]]
             Y2 = [y[1]/t[seq2][0] for y in t[seq2][1]]
-            b[j] = PP.bar(X2,Y2,width=shift,color=self.colours[j])
+            b[j] = PP.bar(self.offsetX(X2),Y2,width=shift,color=self.colours[j])
             #prev = [i+j for (i,j) in zip(delta,prev)]
         #-----------------------------
         PP.legend(([b[bi][0] for bi in b]),lgd,loc=2)
-        PP.title('Raw Zoom Average Time Differences / Res({}), User({})'.format(WHstr,USERS))
+        PP.title('Raw Zoom Average Time Differences / Res({}), User({}{})'.format(WHstr,USERS,'p' if PARA else 's'))
         PP.xlabel('zoom level')
         PP.ylabel('time (seconds)')
         self._output(PP,fn)
+        self.fig.clear()
         
     def plotRawUserTimeMedianDiff(self): 
-        fn = '{}{}/meddiff_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/meddiff_{}.png'.format(FPATH,self.ref,self.ref)
         b = {}
         t = dict()
         lgd = ()
@@ -528,22 +659,24 @@ class BaseMapResult(object):
                 t[kk][1][n] = (col[0],self.median(col[1]))
             
         for j,seq2 in enumerate(t):
-            lgd += ('{}/{}'.format(seq2,t[seq2][0]),)
+            #lgd += ('{}/{}'.format(seq2,t[seq2][0]),)
+            lgd += (self._legend(j,seq2,t),)
             shift = 1.0/len(t)
             #calculate bar width and average Y values/clients
             X2 = [i[0]+(j*shift) for i in t[seq2][1]]
             Y2 = [y[1] for y in t[seq2][1]]
-            b[j] = PP.bar(X2,Y2,width=shift,color=self.colours[j])
+            b[j] = PP.bar(self.offsetX(X2),Y2,width=shift,color=self.colours[j])
             #prev = [i+j for (i,j) in zip(delta,prev)]
         #-----------------------------
         PP.legend(([b[bi][0] for bi in b]),lgd,loc=2)
-        PP.title('Raw Zoom Median Time Differences / Res({}), User({})'.format(WHstr,USERS))
+        PP.title('Raw Zoom Median Time Differences / Res({}), User({}{})'.format(WHstr,USERS,'p' if PARA else 's'))
         PP.xlabel('zoom level')
         PP.ylabel('time (seconds)')
         self._output(PP,fn)
+        self.fig.clear()
         
     def plotTimeDeltaHist(self):
-        fn = '{}{}/dlthist_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/dlthist_{}.png'.format(FPATH,self.ref,self.ref)
         #lis = self.flatten(self.res)
         delta = [] 
         for sequence in self.res:
@@ -552,15 +685,17 @@ class BaseMapResult(object):
             delta += [(p2[i]-p1[i]).seconds+(p2[i]-p1[i]).microseconds/1e6 for i in range(len(p1)-1)]
         #-----------------------------
         PP.hist(delta,50)
-        PP.title('Tile Fetch-Time Histogram / Res({}), User({})'.format(WHstr,USERS))
+        PP.title('Tile Fetch-Time Histogram / Res({}), User({}{})'.format(WHstr,USERS,'p' if PARA else 's'))
         PP.xlabel('seconds/layer')
         PP.ylabel('frequency')
         self._output(PP,fn)
+        self.fig.clear()
         
     #fail,zero,land
     
     def plotTileCounts(self):
-        defns = (('tilefail500','Tile Failure Count HTTP500'),
+        defns = (('tilefail429','Tile Failure Count HTTP429'),
+                 ('tilefail500','Tile Failure Count HTTP500'),
                  ('tilefail503','Tile Failure Count HTTP503'),
                  ('tilefail5XX','Tile Failure Count HTTP5XX'),
                  ('tileblank','Tile Blank Count'),
@@ -570,13 +705,14 @@ class BaseMapResult(object):
             self.plotCount(j,dd)
             
     def plotCount(self,pnum,deftxt):
-        fn = '{}{}/{}_{}.png'.format(fpath,self.ref,deftxt[0],self.ref)
+        fn = '{}{}/{}_{}.png'.format(FPATH,self.ref,deftxt[0],self.ref)
         b = {}
         lgd = ()
         prev = [(x,y) for x,y in zip(range(self.reslen),self.reslen*[0,])][1:]
         for j,sequence in enumerate(self.res):
             #legend
-            lgd += ('{}-{}-{}'.format(j,sequence[0],sequence[1]),)
+            #lgd += ('{}-{}-{}'.format(j,sequence[0],sequence[1]),)
+            lgd += (self._legend(j,sequence),)
             #extract, calc and pair coordinates
             X = [i[1] for i in sequence[2]]
             Y = [v[3][pnum] for v in sequence[2]]#500 errors
@@ -584,19 +720,20 @@ class BaseMapResult(object):
             #set base value for seq
             B = [y for x,y in self.align(xy,prev)]
             #plot bar
-            b[j] = PP.bar(X,Y,bottom=B,color=self.colours[j])
+            b[j] = PP.bar(self.offsetX(X),Y,bottom=B,color=self.colours[j])
             prev = self.stack(xy,prev)
         #-----------------------------
         PP.legend(([b[bi][0] for bi in b]),lgd,loc=2)
-        PP.title('{} / Res({}), User({})'.format(deftxt[1],WHstr,USERS))
+        PP.title('{} / Res({}), User({}{})'.format(deftxt[1],WHstr,USERS,'p' if PARA else 's'))
         PP.xlabel('zoom level')
         PP.ylabel('tile count')
         PP.xlim(0,max([mx for mx,my in prev]))
         self._output(PP,fn)   
+        self.fig.clear()
         
  
     def plot2DHistZoomTime(self):
-        fn = '{}{}/zthist_{}.png'.format(fpath,self.ref,self.ref)
+        fn = '{}{}/zthist_{}.png'.format(FPATH,self.ref,self.ref)
         delta = []
         zrnge = []
         for sequence in self.res:
@@ -616,12 +753,23 @@ class BaseMapResult(object):
         PP.colorbar()
         #-----------------------------
         #PP.legend(([b[bi][0] for bi in b]),t)
-        PP.title('Zoom x Time 2D Histogram / Res({}), User({})'.format(WHstr,USERS))
+        PP.title('Zoom x Time 2D Histogram / Res({}), User({}{})'.format(WHstr,USERS,'p' if PARA else 's'))
         PP.xlabel('time (seconds)')
         PP.ylabel('zoom level')
 
         self._output(PP,fn)
+        self.fig.clear()
         
+    def generateCSV(self):
+        '''Produce summary textual output for analysis'''
+        fn = '{}{}/summary.csv'.format(FPATH,self.ref)
+        with open(fn,'w') as h:
+            h.write('ref,coll,set,trace,X,Y,f429,f500,f503,f5xx,tb,tl\n')
+            for line in self.res:
+                o1 = '{},{},{},'.format(self.ref,line[0],line[1])
+                for pnt in line[2]:
+                    h.write(o1+'{},{},{},{},{},{},{},{},{}\n'.format(pnt[0],pnt[1],pnt[2],pnt[3][0],pnt[3][1],pnt[3][2],pnt[3][3],pnt[3][4],pnt[3][5]))
+
     def stack(self,curr,prev):
         '''Add two datasets provided as pairs by matching x coords'''
         p = dict(prev)
@@ -646,10 +794,49 @@ class BaseMapResult(object):
         else:
             return (slst[index] + slst[index + 1])/2.0
         
-    def _output(self,pobj,fn=None):
+    @classmethod
+    def _output(cls,pobj,fn=None):
         pobj.savefig(fn, bbox_inches='tight') if fn else pobj.show()
-        self.fig.clear()
+
+    @classmethod        
+    def _showTileArray(cls,tilearray):
+        '''Static debugging method to show tile tracking progress'''
+        z = tilearray.keys()[0][2]
+        screensize = min(TSIZE*pow(2,z),TSIZE*WIDTH),min(TSIZE*pow(2,z),TSIZE*HEIGHT)
+        screen = Image.new('RGB',screensize,'grey')
+        blank = Image.new('RGB',2*(TSIZE,),'white')
         
+        xx = sorted(set([a[0] for a in tilearray.keys()]))
+        yy = sorted(set([a[1] for a in tilearray.keys()]))
+        for x in xx:
+            #line = ''
+            for y in yy:
+                print tilearray[(x,y,z)]['url']
+                img = tilearray[(x,y,z)]['img']
+                img.thumbnail(2*(TSIZE,))
+                if tilearray[(x,y,z)]['mn']>LAND_THRESHOLD:
+                    screen.paste(img,((x-min(xx))*TSIZE,(y-min(yy))*TSIZE))
+                else:
+                    screen.paste(blank,((x-min(xx))*TSIZE,(y-min(yy))*TSIZE))
+                #if tilearray[(x,y,z)]['mn']>LAND_THRESHOLD:
+                #    line += '+'
+                #else: line += '-'
+            #print line
+        fn = '{}{}/grid_{}.png'.format(FPATH,TSTAMP,'.'.join(['{0}{1:02d}'.format(i[0],i[1]) for i in zip('ZXY',[tilearray.keys()[0][j] for j in (2,0,1)] )]))
+        BaseMapResult._overlayTileGrid(screen)
+        screen.save(fn)
+        #screen.show()
+        
+    @classmethod
+    def _overlayTileGrid(cls,img):
+        xx,yy = img.size
+        draw = ImageDraw.Draw(img)
+        #verts
+        for x in range(0,xx,TSIZE):
+            draw.line((x,0, x,yy), fill=128)
+        for y in range(0,yy,TSIZE):
+            draw.line((0,y, xx,y), fill=128)
+            
         
     #@classmethod
     #def flatten(cls,lis):
@@ -657,15 +844,16 @@ class BaseMapResult(object):
 
 class MapRange(object):
     
-    def __init__(self,ref,tcol='basemap',tset='colour'):
+    def __init__(self,ref,tcol='default',tset='layer'):
         self.setTileCollection(tcol)
         self.setTileSet(tset)
         
+        id = UU[tcol]['sl'][tset][0]
         self.ref = ref
         self.URL = UU[tcol]['url']
         self.TMS = UU[tcol]['tms']
-        self.SORL = UU[tcol]['sl'][tset]
-        self.STYLE = UU[tcol]['st']
+        self.SORL = UU[tcol]['sl'][tset][0] if UU[tcol]['sl'][tset][0] else NON_PC_LYR
+        self.STYLE = ',style={}'.format(UU[tcol]['sl'][tset][1]) if len(UU[tcol]['sl'][tset])>1 else ''
         #self.zlev = {i:{} for i in range(ZMIN,ZMAX)}
 
         
@@ -678,12 +866,13 @@ class MapRange(object):
         self.tcol = tcol
         
     def getBounds(self,t):
+        '''get values for selection half width/height around centre'''
         return (t-1)/2,t/2+1
     
     def getNeighbours(self,x, y, z, width, height):
         '''Returns coordinates of all valid neighbours within WxH'''
         w,h = self.getBounds(width),self.getBounds(height)
-        return [(a,b,z) for a in range(x-w[0],x+w[1]) for b in range(y-h[0],y+h[1]) if a>-1 and b>-1 and a<=pow(2,z) and b<=pow(2,z)]
+        return [(a,b,z) for a in range(x-w[0],x+w[1]) for b in range(y-h[0],y+h[1]) if a>-1 and b>-1 and a<pow(2,z) and b<pow(2,z)]
     
     @classmethod
     def translate(cls,x,y,z,newz=None):
@@ -694,7 +883,7 @@ class MapRange(object):
     @classmethod            
     def shift(self,x,y,z):
         '''Blindly(!) select a neighbouring tile if the zoomed centre tile doesnt return any valid land tiles'''
-        return (x+random.randint(-1,1),y+random.randint(-1,1),z)
+        return (abs(x+random.randint(-1,1)),abs(y+random.randint(-1,1)),z)
     
     
     @classmethod
@@ -761,9 +950,14 @@ class TileFetcher(threading.Thread):
         err = None
         while True:
             try:
+                t1 = datetime.now()
                 istr = urllib2.urlopen(req).read()
+                t2 = datetime.now()
                 img = Image.open(StringIO.StringIO(istr))
+                t3 = datetime.now()
                 istat = ImageStat.Stat(img)
+                t4 = datetime.now()
+                bmtlog.info('URL={},T-url={}, T-opn={}, T-stt={}'.format(url,t2-t1,t3-t2,t4-t3))
                 isx = (istat.mean[0],istat.stddev[0],istat.extrema)
                 break
             except HTTPError as he:
@@ -780,7 +974,7 @@ class TileFetcher(threading.Thread):
                     bmtlog.error('{}.{}# {} - {}'.format(self.ref,self.cref,he,url))
                     break
             except Exception as ue:
-                print 'Unknown Error retrieving url {}\n{}'.format(url,ue)
+                print 'Unknown Error retrieving url {}\n{}\n'.format(url,ue)
                 if retry<MAX_RETRY:
                     print '{}.{}# Retrying {} - {}'.format(self.ref,self.cref,retry,(x,y,z))
                     err = 0
@@ -792,10 +986,10 @@ class TileFetcher(threading.Thread):
                     bmtlog.error('{}.{}# {} - {}'.format(self.ref,self.cref,ue,url))
                     break
                 
-        return {(x,y,z):{'img':img,'mn':isx[0],'sd':isx[1],'ex':isx[2]<>[(15,15)],'er':err}}
+        return {(x,y,z):{'img':img,'mn':isx[0],'sd':isx[1],'ex':isx[2]<>[(15,15)],'er':err,'url':url}}
     
 #------------------------------------------------------------------------------------------
-def logger(lf,ll=logging.DEBUG,ff=2):
+def logger(lf,rlid=None,ll=logging.DEBUG,ff=2):
     formats = {1:'%(asctime)s - %(levelname)s - %(module)s %(lineno)d - %(message)s',
                2:'%(asctime)s - %(levelname)s - %(message)s',
                3:':: %(module)s %(lineno)d - %(message)s',
@@ -804,10 +998,11 @@ def logger(lf,ll=logging.DEBUG,ff=2):
     log = logging.getLogger(lf)
     log.setLevel(ll)
     
-    path = os.path.normpath(os.path.join(os.path.dirname(__file__),tstamp))
+    path = os.path.normpath(os.path.join(os.path.dirname(__file__),rlid if rlid else TSTAMP))
+    path = path.replace(',',PTH_DELIM)
     if not os.path.exists(path):
         os.mkdir(path)
-    df = os.path.join(path,lf.lower())
+    df = os.path.join(path,'{}_{}.log'.format(lf.upper(),TSTAMP))
     
     fh = logging.FileHandler(df,'w')
     fh.setLevel(logging.DEBUG)
@@ -856,21 +1051,22 @@ def proxysetup(host,port):
     #print 'Installing proxy',host,port
     urllib2.install_opener(opener)
     
-def setup():
+def setup(k=None):
     '''Do any GLOBAL settings'''
     global KEY
-    KEY = apikey(akf)
+    KEY = apikey(k if k else akf)
     
     #global B64A
     #B64A = encode({'user':u,'pass':p,'domain':d} if d else {'user':u,'pass':p})
 
 def main():
-    '''run test routines/simulations'''   
+    '''run test routines/simulations'''     
+    global USERS
     reloadid = None
     tc,ts = DEF_TILE_COLLECTION,DEF_TILE_SET
     
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "ivw:h:r:u:p:", ["info","version","width=","height=","reload=","users=","proxy="])
+        opts, args = getopt.getopt(sys.argv[1:], "ivsw:h:r:u:p:", ["info","version","sequential","width=","height=","reload=","users=","proxy="])
 
     except getopt.error, msg:
         print msg
@@ -887,8 +1083,10 @@ def main():
             print VER
             sys.exit(0)
         elif opt in ("-u","--users"):
-            global USERS
             USERS = int(val)
+        elif opt in ("-q","--sequential"):
+            global PARA
+            PARA = False
         elif opt in ("-r","--reload"):
             reloadid = val 
         elif opt in ("-h","--height"):
@@ -899,30 +1097,40 @@ def main():
             WIDTH = int(val) 
         elif opt in ("-p","--proxy"):
             proxysetup(*val.split(':')) 
+        elif opt in ("-s","--show"):
+            global SHOW
+            SHOW = True
         else:
             print "unrecognised option:\n" \
             "-u (--users) Number of users to simulate (thread count)." \
+            "-q (--sequential) Run users in Sequence or Parallel." \
             "-p (--proxy) Use proxy with format host:port."  \
             "-h (--height) Number of tiles to fetch, vertical. Default=5" \
             "-w (--width) Number of tiles to fetch, horizontal. Default=7" \
-            "-r (--replay) Reload/Replot a previously saved test." \
+            "-r (--reload) Reload/Replot a previously saved test." \
             "-v (--version) Display version information" \
-            "-h (--help) Display this message"
+            "-i (--info) Display this message" \
+            "-s (--show) Generate tile-success thumbnails. (Sets users to 1)"
             sys.exit(2)
-            
+                
     global bmtlog
-    bmtlog = logger(LOGFILE)
+    bmtlog = logger(LOGFILE,reloadid)
     
     tr = TestRunner()
     
     if reloadid:
-        #BUG. If reloading a non default HxW dataset plot titles will be build with default WxH labels. FIXED bmp.setconf
-        tr.loadTestResults(reloadid)
+        bmtlog.info('Reload dataset {}'.format(reloadid))
+        tr._rebuildResults(reloadid.split(',') if re.search(',',reloadid) else reloadid)
+        #tr.loadTestResults(reloadid)
         return
         
     global WHstr
     WHstr = str(WIDTH)+'x'+str(HEIGHT)
     
+    if SHOW and USERS>1:
+        print '*** WARNING. "-s" selected, generating tile map. Ignoring request for multiple {} users! ***'.format(USERS)
+        USERS = 1
+        
     if len(args)==0:
         usage()
         sys.exit(0)
@@ -930,7 +1138,7 @@ def main():
     else:
         
         for arg in args:
-            argmatch = re.match('(set|layer|file)(\d+|\w+\.\w*)', arg, re.IGNORECASE)
+            argmatch = re.match('({})(\d+|\w+)'.format('|'.join(ARG_PREFIXES)), arg, re.IGNORECASE)
             if arg.lower() in ("rand", "random"):
                 tc,ts = 'RAND','RAND'
             elif arg.lower() in ("all",):
@@ -938,11 +1146,12 @@ def main():
             elif argmatch:
                 tc,ts = argmatch.group(1).lower(),argmatch.group(2)
             else:
-                print "Set/Layer definition required, use ALL|RAND|layer_id"
+                print "Set/Layer definition required, use ALL|RAND|layer<layer_id>|set<set_id>|file<filename>|ref<UUcoll><UUset>"
                 usage()
                 sys.exit(0)
                 
     #tc,ts can be eithe all or rand identifiers or a combo of set|layer+id
+    bmtlog.info('Initial params TC:{} TS:{}'.format(tc,ts))
     tr.testMultiUser(tc,ts)
     return
     

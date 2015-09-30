@@ -80,6 +80,7 @@ import matplotlib as mpl
 class ImpossibleZoomLevelCoordinate(Exception): pass
 class UnknownLandTypeRequest(Exception): pass
 class UnknownConfigLayerRequest(Exception): pass
+class MismatchedConfiguration(Exception): pass
 
 VER = 1.0
 MAX_RETRY = 10
@@ -244,20 +245,24 @@ class TestRunner(object):
     
         bmp.dump()
         bmr.show()
-        return True
-        
+        return True    
+    
     def loadTestResults(self,ref): 
         bmp = BaseMapPickle(ref)
         data = bmp.load()
-        h,w,l = bmp.getconf()
+        self.setHWL(*bmp.getconf())
+        bmr = BaseMapResult(ref,data)
+        bmr.show()
+        
+    def setHWL(self,h,w,l):
+        '''Sets global variables Height,Width and the layer flag'''
         global HEIGHT
         HEIGHT = h
         global WIDTH
         WIDTH = w
         global NON_PC_LYR
         NON_PC_LYR = l
-        bmr = BaseMapResult(ref,data)
-        bmr.show()
+        
         
     @classmethod
     def getEveryTileSet(cls):
