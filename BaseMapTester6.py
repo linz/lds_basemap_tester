@@ -68,14 +68,22 @@ import re
 import pickle
 import getopt
 import logging
+import zipfile
 
 import threading
 import Queue
 import numpy as NP
 
 #from mpl_toolkits.basemap import Basemap
-import matplotlib.pyplot as PP
 import matplotlib as mpl
+from email import encoders
+mpl.use('Agg')
+import matplotlib.pyplot as PP
+
+#mail sending
+from smtplib import SMTP
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
 
 class ImpossibleZoomLevelCoordinate(Exception): pass
 class UnknownLandTypeRequest(Exception): pass
@@ -95,9 +103,12 @@ KEY = ''
 B64A = ''
 PARA = True
 SHOW = False
+EMAIL = None
 NON_PC_LYR = 0
 MULTI = 'multi'
 PTH_DELIM = '.'
+PHOST = '127.0.0.1'
+PPORT = 3128
 
 #Tile thumbnail size
 TSIZE = 64
@@ -247,7 +258,7 @@ class TestRunner(object):
     
         bmp.dump()
         bmr.show()
-        return True    
+        return bmr.ref    
     
     def loadTestResults(self,ref): 
         bmp = BaseMapPickle(ref)
@@ -256,7 +267,7 @@ class TestRunner(object):
         bmr = BaseMapResult(ref,data)
         bmr.show()
         
-    def _rebuildResults(self,ref):
+    def rebuildResults(self,ref):
         '''rebuilds plots from single or multiple backups'''
         data,hwl = {},()
         if isinstance(ref,(list,tuple)):
@@ -274,6 +285,7 @@ class TestRunner(object):
             self.setHWL(*bmp.getconf())
         bmr = BaseMapResult(ref,self.sortData(data))
         bmr.show()
+        return (bmr.tc,bmr.ts,bmr.ref)
         
     def mergeResults(self,d1):
         '''merge multiple results into a single dataset effectively merging different timestamps as additional users/threads'''
@@ -518,6 +530,7 @@ class BaseMapResult(object):
             self.colours = [self.cmap(float(i)/len(self.res)) for i in range(len(self.res))]
             
         self.fig = PP.figure()
+        self.tc,self.ts = self.res[0][0],self.res[0][1]
 
         
     def offsetX(self,xx):
@@ -535,7 +548,6 @@ class BaseMapResult(object):
         self.plotRawUserTimeMedianDiff()
         self.plotTimeDeltaHist()
         self.plotTileCounts()
-        #self.plot2DHistZoomTime() since implementing non numeric ref values this no longer works
         self.generateCSV()
         
     def _legend(self,j,seq,t=None):
@@ -729,35 +741,6 @@ class BaseMapResult(object):
         PP.ylabel('tile count')
         PP.xlim(0,max([mx for mx,my in prev]))
         self._output(PP,fn)   
-        self.fig.clear()
-        
- 
-    def plot2DHistZoomTime(self):
-        fn = '{}{}/zthist_{}.png'.format(FPATH,self.ref,self.ref)
-        delta = []
-        zrnge = []
-        for sequence in self.res:
-            p1 = [v[2] for v in sequence[2]]
-            p2 = p1[1:]
-            delta += [float((p2[i]-p1[i]).seconds+(p2[i]-p1[i]).microseconds/1e6) for i in range(len(p1)-1)]
-            zrnge += [v[0]*20 for v in sequence[2]][:-1]
-        #-----------------------------
-        #x = NP.random.randn(3000)-1
-        x = NP.array(delta)
-        #y = NP.random.randn(3000)*2+1
-        y = NP.array(zrnge)
-        h,xx,yy = NP.histogram2d(x,y,bins=20,range=[[0,200],[0,200]])
-        extent = [xx[0], xx[-1], yy[0], yy[-1] ]
-        
-        PP.imshow(h.T,extent=extent,interpolation='bicubic',origin='lower')
-        PP.colorbar()
-        #-----------------------------
-        #PP.legend(([b[bi][0] for bi in b]),t)
-        PP.title('Zoom x Time 2D Histogram / Res({}), User({}{})'.format(WHstr,USERS,'p' if PARA else 's'))
-        PP.xlabel('time (seconds)')
-        PP.ylabel('zoom level')
-
-        self._output(PP,fn)
         self.fig.clear()
         
     def generateCSV(self):
@@ -957,7 +940,7 @@ class TileFetcher(threading.Thread):
                 t3 = datetime.now()
                 istat = ImageStat.Stat(img)
                 t4 = datetime.now()
-                bmtlog.info('URL={},T-url={}, T-opn={}, T-stt={}'.format(url,t2-t1,t3-t2,t4-t3))
+                bmtlog.info('URL={},T-url={}, T-opn={}, T-stt={}'.format(kmask(url),t2-t1,t3-t2,t4-t3))
                 isx = (istat.mean[0],istat.stddev[0],istat.extrema)
                 break
             except HTTPError as he:
@@ -971,7 +954,7 @@ class TileFetcher(threading.Thread):
                     print 'Setting zero stats'
                     img = None
                     isx = ([0], [0], [(15,15)])
-                    bmtlog.error('{}.{}# {} - {}'.format(self.ref,self.cref,he,url))
+                    bmtlog.error('{}.{}# {} - {}'.format(self.ref,self.cref,he,kmask(url)))
                     break
             except Exception as ue:
                 print 'Unknown Error retrieving url {}\n{}\n'.format(url,ue)
@@ -983,7 +966,7 @@ class TileFetcher(threading.Thread):
                     print 'Setting zero stats'
                     img = None
                     isx = ([0], [0], [(15,15)])
-                    bmtlog.error('{}.{}# {} - {}'.format(self.ref,self.cref,ue,url))
+                    bmtlog.error('{}.{}# {} - {}'.format(self.ref,self.cref,ue,kmask(url)))
                     break
                 
         return {(x,y,z):{'img':img,'mn':isx[0],'sd':isx[1],'ex':isx[2]<>[(15,15)],'er':err,'url':url}}
@@ -1016,6 +999,10 @@ def logger(lf,rlid=None,ll=logging.DEBUG,ff=2):
 def encode(auth):
     return base64.encodestring('{0}:{1}'.format(auth['user'], auth['pass'])).replace('\n', '')
 
+def kmask(ktext):
+    '''Given a ktext string (eg url) mask out KEY'''
+    return re.sub(KEY,'<api-key>',str(ktext))
+
 def apikey(kfile):
     '''Read API Key from file'''
     return searchfile(kfile,'key')
@@ -1033,6 +1020,57 @@ def searchfile(sfile,skey,default=None):
             if k: value=k.group(1)
     return value
 
+def proxysetup(host,port):
+    proxy = ProxyHandler({'http': '{0}:{1}'.format(host,port)})
+    opener = urllib2.build_opener(proxy)
+    #print 'Installing proxy',host,port
+    urllib2.install_opener(opener)
+
+def zipdir(path, zhandle):
+    # ziph is zipfile handle
+    for root, _, files in os.walk(path):
+        for file in files:
+            zhandle.write(os.path.join(root, file)) 
+            
+def email(tc,ts,zdir):
+    '''post the results'''
+    print 'Sending report to',EMAIL
+    server = 'linzsmtp.ad.linz.govt.nz'
+    sender = 'no-reply@linz.govt.nz'
+    recipients = EMAIL.split(',')
+    content = 'Test results for {0} / {1} on {2:%y-%m-%d %H:%M:%S}'.format(tc,ts,DT.now())
+    subject = 'WMTS Test Results {0:%y-%m-%d %H:%M:%S}'.format(DT.now())
+    
+    zname = '{}.{}.{}.zip'.format(tc,ts,zdir)
+    zfile = zipfile.ZipFile(zname, 'w')
+    zipdir(zdir, zfile)
+    zfile.close()
+
+    try:
+        atc = MIMEBase('application','zip')
+        with open(zname, 'rb') as zopen:
+            atc.set_payload(zopen.read())
+        encoders.encode_base64(atc)
+        atc.add_header('Content-Disposition', 'attachment', filename=zname)
+        
+        msg = MIMEMultipart()
+        msg['Subject'] = subject
+        msg['From'] = sender
+        msg['To'] = ';'.join(recipients)
+        msg.preamble = content
+        msg.attach(atc)
+        
+        conn = SMTP(server) 
+        conn.set_debuglevel(False)
+        #conn.login(*creds())
+        try:
+            conn.sendmail(msg['From'], msg['To'], msg.as_string())
+        finally:
+            conn.close()
+    
+    except Exception as exc:
+        sys.exit( 'Email sending failed; {0}'.format(exc))
+         
 def usage():
     print "Usage: python BaseMapTester_old.py -u <users> [-h <height> - w <width>] [-r <replay>] <layer_id|'RAND'|'ALL'>"
     print "ARGS\t{set|layer}layer_id. identifier 'layer' or 'set' followed by\n\tthe specific set/layer you want to test"
@@ -1044,12 +1082,6 @@ def usage():
     print "\t-w <width>. Horizontal tile count."
     print "Version --version/-v."
     print "Help --info/-i"
-
-def proxysetup(host,port):
-    proxy = ProxyHandler({'http': '{0}:{1}'.format(host,port)})
-    opener = urllib2.build_opener(proxy)
-    #print 'Installing proxy',host,port
-    urllib2.install_opener(opener)
     
 def setup(k=None):
     '''Do any GLOBAL settings'''
@@ -1066,7 +1098,7 @@ def main():
     tc,ts = DEF_TILE_COLLECTION,DEF_TILE_SET
     
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "ivsw:h:r:u:p:", ["info","version","sequential","width=","height=","reload=","users=","proxy="])
+        opts, args = getopt.getopt(sys.argv[1:], "ivqsr:h:w:u:p:e:", ["info","version","sequential","show","reload=","height=","width=","users=","proxy=","email="])
 
     except getopt.error, msg:
         print msg
@@ -1082,11 +1114,12 @@ def main():
         elif opt in ("-v", "--version"):
             print VER
             sys.exit(0)
-        elif opt in ("-u","--users"):
-            USERS = int(val)
         elif opt in ("-q","--sequential"):
             global PARA
-            PARA = False
+            PARA = False        
+        elif opt in ("-s","--show"):
+            global SHOW
+            SHOW = True
         elif opt in ("-r","--reload"):
             reloadid = val 
         elif opt in ("-h","--height"):
@@ -1094,12 +1127,16 @@ def main():
             HEIGHT = int(val) 
         elif opt in ("-w","--width"):
             global WIDTH
-            WIDTH = int(val) 
+            WIDTH = int(val)
+        elif opt in ("-u","--users"):
+            USERS = int(val) 
         elif opt in ("-p","--proxy"):
+            h,p = '{}:{}'.format(PHOST,PPORT) if val=='PROXY' else val.split(':')
             proxysetup(*val.split(':')) 
-        elif opt in ("-s","--show"):
-            global SHOW
-            SHOW = True
+        elif opt in ("-e","--email"):
+            #todo. validation
+            global EMAIL
+            EMAIL = val if val else None
         else:
             print "unrecognised option:\n" \
             "-u (--users) Number of users to simulate (thread count)." \
@@ -1110,7 +1147,8 @@ def main():
             "-r (--reload) Reload/Replot a previously saved test." \
             "-v (--version) Display version information" \
             "-i (--info) Display this message" \
-            "-s (--show) Generate tile-success thumbnails. (Sets users to 1)"
+            "-s (--show) Generate tile-success thumbnails. (Sets users to 1)" \
+            "-e (--email) Who to send a report to, comma separated list. Default=nobody"
             sys.exit(2)
                 
     global bmtlog
@@ -1120,7 +1158,8 @@ def main():
     
     if reloadid:
         bmtlog.info('Reload dataset {}'.format(reloadid))
-        tr._rebuildResults(reloadid.split(',') if re.search(',',reloadid) else reloadid)
+        bmrref = tr.rebuildResults(reloadid.split(',') if re.search(',',reloadid) else reloadid)
+        if EMAIL: email(*bmrref)
         #tr.loadTestResults(reloadid)
         return
         
@@ -1152,7 +1191,8 @@ def main():
                 
     #tc,ts can be eithe all or rand identifiers or a combo of set|layer+id
     bmtlog.info('Initial params TC:{} TS:{}'.format(tc,ts))
-    tr.testMultiUser(tc,ts)
+    bmrref = tr.testMultiUser(tc,ts)
+    if EMAIL: email(tc,ts,bmrref)
     return
     
     
