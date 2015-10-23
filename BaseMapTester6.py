@@ -90,6 +90,7 @@ class UnknownLandTypeRequest(Exception): pass
 class UnknownConfigLayerRequest(Exception): pass
 class MismatchedConfigurationException(Exception): pass
 class MultipleTraceException(Exception): pass
+class ImageAccessException(Exception): pass
 
 VER = 1.0
 MAX_RETRY = 10
@@ -601,6 +602,7 @@ class BaseMapResult(object):
             xy = [(x,y) for x,y in zip(X,Y)]
             #set base value for seq
             B = [y for x,y in self.align(xy,prev)]
+            B = B + [0,]*(len(Y)-len(B))
             #plot bar
             b[j] = PP.bar(self.offsetX(X),Y,bottom=B,color=self.colours[j])
             #store new stack value
@@ -739,6 +741,7 @@ class BaseMapResult(object):
             xy = [(x,y) for x,y in zip(X,Y)]
             #set base value for seq
             B = [y for x,y in self.align(xy,prev)]
+            B = B + [0,]*(len(Y)-len(B))
             #plot bar
             b[j] = PP.bar(self.offsetX(X),Y,bottom=B,color=self.colours[j])
             prev = self.stack(xy,prev)
@@ -796,6 +799,7 @@ class BaseMapResult(object):
         screensize = min(TSIZE*pow(2,z),TSIZE*WIDTH),min(TSIZE*pow(2,z),TSIZE*HEIGHT)
         screen = Image.new('RGB',screensize,'grey')
         blank = Image.new('RGB',2*(TSIZE,),'white')
+        fault = Image.new('RGB',2*(TSIZE,),'black')
         
         xx = sorted(set([a[0] for a in tilearray.keys()]))
         yy = sorted(set([a[1] for a in tilearray.keys()]))
@@ -804,6 +808,9 @@ class BaseMapResult(object):
             for y in yy:
                 print tilearray[(x,y,z)]['url']
                 img = tilearray[(x,y,z)]['img']
+                if not img:
+                    img = fault
+                    #raise ImageAccessException('No image available at ({},{},{},)'.format(x,y,z))
                 img.thumbnail(2*(TSIZE,))
                 if tilearray[(x,y,z)]['mn']>LAND_THRESHOLD:
                     screen.paste(img,((x-min(xx))*TSIZE,(y-min(yy))*TSIZE))
@@ -983,9 +990,9 @@ class Labeller(object):
     '''Set consistent labels for paths/filenames and legends'''
     mdm = '-'
     
-    def __init__(self,input):
-        self.input = input
-        self.llist = input.split(',') if re.search(',',input) else [input,]
+    def __init__(self,inlbl):
+        #self.inlbl = inlbl
+        self.llist = inlbl.split(',') if re.search(',',inlbl) else [inlbl,]
         self.lfd = {}
         self.label = self._label()
         

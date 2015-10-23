@@ -80,7 +80,7 @@ import matplotlib as mpl
 class ImpossibleZoomLevelCoordinate(Exception): pass
 class UnknownLandTypeRequest(Exception): pass
 class UnknownConfigLayerRequest(Exception): pass
-class MismatchedConfiguration(Exception): pass
+class MismatchedConfigurationException(Exception): pass
 
 VER = 1.0
 MAX_RETRY = 10
