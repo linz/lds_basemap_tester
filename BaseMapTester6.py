@@ -72,11 +72,10 @@ import zipfile
 
 import threading
 import Queue
-import numpy as NP
 
 #from mpl_toolkits.basemap import Basemap
 import matplotlib as mpl
-from email import encoders
+from re import IGNORECASE
 mpl.use('Agg')
 import matplotlib.pyplot as PP
 
@@ -84,11 +83,14 @@ import matplotlib.pyplot as PP
 from smtplib import SMTP
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
+from email import encoders
 
 class ImpossibleZoomLevelCoordinate(Exception): pass
 class UnknownLandTypeRequest(Exception): pass
 class UnknownConfigLayerRequest(Exception): pass
-class MismatchedConfiguration(Exception): pass
+class MismatchedConfigurationException(Exception): pass
+class MultipleTraceException(Exception): pass
+class ImageAccessException(Exception): pass
 
 VER = 1.0
 MAX_RETRY = 10
@@ -201,6 +203,7 @@ sty = 'auto'
 FPATH = ''
 TSTAMP = '{0:%y%m%d_%H%M%S}'.format(DT.now())
 bmtlog = None#logging.getLogger(None)
+LABEL = None
 
 #-------------------------------------------------------------------------------------------
 #tmst = 'Contents/TileMatrixSet/ows:Title'
@@ -267,40 +270,42 @@ class TestRunner(object):
         bmr = BaseMapResult(ref,data)
         bmr.show()
         
-    def rebuildResults(self,ref):
+    def rebuildResults(self):
         '''rebuilds plots from single or multiple backups'''
         data,hwl = {},()
-        if isinstance(ref,(list,tuple)):
-            for r in ref:                    
-                bmp = BaseMapPickle(r)
-                data[r] = bmp.load()
-                hwl += (bmp.getconf(),)
-            #make sure we're comparing similar layers and similar dimensions
-            if len(set(hwl))>1 or len(set([(cs[0],cs[1]) for cs in [dx[0] for dx in data.values()]]))>1: raise MismatchedConfiguration()
-            data = self.flattenResults(self.mergeResults(data))
-            self.setHWL(*list(set(hwl))[0])
-        else:
-            bmp = BaseMapPickle(ref)
-            data[ref] = bmp.load()
-            self.setHWL(*bmp.getconf())
-        bmr = BaseMapResult(ref,self.sortData(data))
+        #if isinstance(ref,(list,tuple)):
+        for r in LABEL.llist:                    
+            bmp = BaseMapPickle(r)
+            data[r] = bmp.load()
+            hwl += (bmp.getconf(),)
+        #make sure we're comparing similar layers and similar dimensions
+        if len(set(hwl))>1 or len(set([(cs[0],cs[1]) for cs in [dx[0] for dx in data.values()]]))>1: raise MismatchedConfigurationException()
+        data = self.flattenResults(self.mergeResults(data))
+        self.setHWL(*list(set(hwl))[0])
+        #else:
+        #    bmp = BaseMapPickle(ref)
+        #    data[ref] = bmp.load()
+        #    self.setHWL(*bmp.getconf())
+        bmr = BaseMapResult(LABEL.lfd['dir'],self.sortData(data))
         bmr.show()
         return (bmr.tc,bmr.ts,bmr.ref)
         
     def mergeResults(self,d1):
         '''merge multiple results into a single dataset effectively merging different timestamps as additional users/threads'''
         d2 = {}
-        for tset in d1:
-            for t1 in d1[tset]:
+        for d_t in d1:
+            d_t2 = ()
+            for t1 in d1[d_t]:
                 t2 = ()
-                for p1 in  t1[2]:
+                for p1 in t1[2]:
                     #append tset name to ref
-                    p2 = ('{}-u{}'.format(tset,p1[0]),)+p1[1:]
+                    p2 = ('{}-u{}'.format(d_t,p1[0]),)+p1[1:]
                     #print 'p1',p1,'-> p2',p2
                     t2 += (p2,)
-                t2 = t1[:2]+(t2,)
+                d_t2 = t1[:2]+(t2,)#
                 #print 't1',t1,'-> t2',t2
-                d2[tset] = [t2,]
+                if d2.has_key(d_t): d2[d_t] += [d_t2,]
+                else: d2[d_t] = [d_t2,]
             #print 'd1',d1,'-> d2',d2
         return d2
     
@@ -465,8 +470,8 @@ class BaseMapTester(threading.Thread):
         self.outq.task_done()
     
     def testBaseMap(self,ref):
-        referenceno = '{}.{}'.format(self.ref,ref)
-        dlist = ((referenceno,self.zmin,DT.now(),(0,0,0,0,0,0)),)
+        #referenceno = '{}.{}'.format(self.ref,ref)
+        dlist = ((ref,self.zmin,DT.now(),(0,0,0,0,0,0)),)
         tlist = {}
         xyz = (self.xinit,self.yinit,self.zmin)
         mr = MapRange(ref,self.tcol,self.tset)
@@ -513,7 +518,7 @@ class BaseMapTester(threading.Thread):
 class BaseMapResult(object):
     def __init__(self,ref,res=[]):
         #pylint: disable=E1103
-        self.ur,self.ref = ('r','.'.join(ref)) if isinstance(ref,(list,tuple)) else ('u',ref)
+        self.ur,self.ref = ('r',LABEL.lfd['file']) if Labeller.testRefType(ref) else ('u',ref)
         if res: 
             self.res = res[MULTI] if isinstance(res,dict) and res.has_key(MULTI) else res.values()[0]
             self.setup()
@@ -551,9 +556,13 @@ class BaseMapResult(object):
         self.generateCSV()
         
     def _legend(self,j,seq,t=None):
+        tcol,tseq = seq[0],seq[1]
+        trace = set([tx[0] for tx in seq[2]])
+        if len(trace)>1: raise MultipleTraceException('Detected multiple user/trace definitions in dataset')
+        trace = trace.pop()
         extra = '-'+NON_PC_LYR if NON_PC_LYR else ''
-        if t: return 't{}-{}{}'.format(t[seq][0],seq,extra)
-        return '{}{}-{}-{}{}'.format(self.ur,j,seq[0],seq[1],extra)
+        if t: return '{}-t{}-{}{}'.format(trace,t[seq][0],seq,extra)
+        return '{}-{}{}-{}-{}{}'.format(trace,self.ur,j,tcol,tseq,extra)
     
     def plotRawUserTimeLine(self):
         fn = '{}{}/rawtime_{}.png'.format(FPATH,self.ref,self.ref)
@@ -593,6 +602,7 @@ class BaseMapResult(object):
             xy = [(x,y) for x,y in zip(X,Y)]
             #set base value for seq
             B = [y for x,y in self.align(xy,prev)]
+            B = B + [0,]*(len(Y)-len(B))
             #plot bar
             b[j] = PP.bar(self.offsetX(X),Y,bottom=B,color=self.colours[j])
             #store new stack value
@@ -731,6 +741,7 @@ class BaseMapResult(object):
             xy = [(x,y) for x,y in zip(X,Y)]
             #set base value for seq
             B = [y for x,y in self.align(xy,prev)]
+            B = B + [0,]*(len(Y)-len(B))
             #plot bar
             b[j] = PP.bar(self.offsetX(X),Y,bottom=B,color=self.colours[j])
             prev = self.stack(xy,prev)
@@ -788,6 +799,7 @@ class BaseMapResult(object):
         screensize = min(TSIZE*pow(2,z),TSIZE*WIDTH),min(TSIZE*pow(2,z),TSIZE*HEIGHT)
         screen = Image.new('RGB',screensize,'grey')
         blank = Image.new('RGB',2*(TSIZE,),'white')
+        fault = Image.new('RGB',2*(TSIZE,),'black')
         
         xx = sorted(set([a[0] for a in tilearray.keys()]))
         yy = sorted(set([a[1] for a in tilearray.keys()]))
@@ -796,6 +808,9 @@ class BaseMapResult(object):
             for y in yy:
                 print tilearray[(x,y,z)]['url']
                 img = tilearray[(x,y,z)]['img']
+                if not img:
+                    img = fault
+                    #raise ImageAccessException('No image available at ({},{},{},)'.format(x,y,z))
                 img.thumbnail(2*(TSIZE,))
                 if tilearray[(x,y,z)]['mn']>LAND_THRESHOLD:
                     screen.paste(img,((x-min(xx))*TSIZE,(y-min(yy))*TSIZE))
@@ -971,8 +986,36 @@ class TileFetcher(threading.Thread):
                 
         return {(x,y,z):{'img':img,'mn':isx[0],'sd':isx[1],'ex':isx[2]<>[(15,15)],'er':err,'url':url}}
     
+class Labeller(object):
+    '''Set consistent labels for paths/filenames and legends'''
+    mdm = '-'
+    
+    def __init__(self,inlbl):
+        #self.inlbl = inlbl
+        self.llist = inlbl.split(',') if re.search(',',inlbl) else [inlbl,]
+        self.lfd = {}
+        self.label = self._label()
+        
+        
+    def _label(self):
+        '''Generate label, dir and file names'''
+        tsort = sorted(self.llist)
+        tfirst = tsort[0]
+        tlast = tsort[-1]
+        tcount = len(tsort)
+        self.lfd['label'] = '{}{}{}'.format(tfirst,self.mdm,tcount)
+        self.lfd['file'] = '{}{}{}'.format(tfirst,self.mdm,tcount)
+        self.lfd['dir'] = '{}{}{}'.format(tfirst,self.mdm,tcount)
+        
+    @classmethod
+    def testRefType(cls,ref):
+        '''Tests whether ref is a plain date_time ref or a multi trace'''
+        return len(ref)>13 and re.search(cls.mdm,ref)
+        
+        
 #------------------------------------------------------------------------------------------
-def logger(lf,rlid=None,ll=logging.DEBUG,ff=2):
+def logger(lf,ll=logging.DEBUG,ff=2):
+    rlid = LABEL.lfd['dir'] if LABEL else None
     formats = {1:'%(asctime)s - %(levelname)s - %(module)s %(lineno)d - %(message)s',
                2:'%(asctime)s - %(levelname)s - %(message)s',
                3:':: %(module)s %(lineno)d - %(message)s',
@@ -1025,21 +1068,21 @@ def proxysetup(host,port):
     opener = urllib2.build_opener(proxy)
     #print 'Installing proxy',host,port
     urllib2.install_opener(opener)
-
+ 
 def zipdir(path, zhandle):
-    # ziph is zipfile handle
+    '''Zip up entire directory'''
     for root, _, files in os.walk(path):
-        for file in files:
-            zhandle.write(os.path.join(root, file)) 
+        for f in files:
+            zhandle.write(os.path.join(root, f)) 
             
 def email(tc,ts,zdir):
-    '''post the results'''
-    print 'Sending report to',EMAIL
+    '''Send the zipped results'''
     server = 'linzsmtp.ad.linz.govt.nz'
     sender = 'no-reply@linz.govt.nz'
-    recipients = EMAIL.split(',')
+    recipients = filter(None,[_validateEmailAddress(ea) for ea in EMAIL.split(',')])
     content = 'Test results for {0} / {1} on {2:%y-%m-%d %H:%M:%S}'.format(tc,ts,DT.now())
     subject = 'WMTS Test Results {0:%y-%m-%d %H:%M:%S}'.format(DT.now())
+    print 'Sending report to',recipients
     
     zname = '{}.{}.{}.zip'.format(tc,ts,zdir)
     zfile = zipfile.ZipFile(zname, 'w')
@@ -1056,7 +1099,7 @@ def email(tc,ts,zdir):
         msg = MIMEMultipart()
         msg['Subject'] = subject
         msg['From'] = sender
-        msg['To'] = ';'.join(recipients)
+        msg['To'] = ', '.join(recipients)
         msg.preamble = content
         msg.attach(atc)
         
@@ -1064,13 +1107,21 @@ def email(tc,ts,zdir):
         conn.set_debuglevel(False)
         #conn.login(*creds())
         try:
-            conn.sendmail(msg['From'], msg['To'], msg.as_string())
+            conn.sendmail(msg['From'], recipients, msg.as_string())
         finally:
             conn.close()
     
     except Exception as exc:
         sys.exit( 'Email sending failed; {0}'.format(exc))
          
+def _validateEmailAddress(ea):
+    dom = ('linz.govt.nz','koordinates.com')
+    if not re.search('@', ea): return None
+    if not any([d for d in dom if re.search(d,ea,flags=re.IGNORECASE)]): return None
+    return ea
+
+
+    
 def usage():
     print "Usage: python BaseMapTester_old.py -u <users> [-h <height> - w <width>] [-r <replay>] <layer_id|'RAND'|'ALL'>"
     print "ARGS\t{set|layer}layer_id. identifier 'layer' or 'set' followed by\n\tthe specific set/layer you want to test"
@@ -1121,7 +1172,8 @@ def main():
             global SHOW
             SHOW = True
         elif opt in ("-r","--reload"):
-            reloadid = val 
+            global LABEL
+            LABEL = Labeller(val)
         elif opt in ("-h","--height"):
             global HEIGHT
             HEIGHT = int(val) 
@@ -1152,13 +1204,13 @@ def main():
             sys.exit(2)
                 
     global bmtlog
-    bmtlog = logger(LOGFILE,reloadid)
+    bmtlog = logger(LOGFILE)
     
     tr = TestRunner()
     
-    if reloadid:
-        bmtlog.info('Reload dataset {}'.format(reloadid))
-        bmrref = tr.rebuildResults(reloadid.split(',') if re.search(',',reloadid) else reloadid)
+    if LABEL:
+        bmtlog.info('Reload dataset {}'.format(LABEL.lfd['dir']))
+        bmrref = tr.rebuildResults()
         if EMAIL: email(*bmrref)
         #tr.loadTestResults(reloadid)
         return
